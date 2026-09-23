@@ -3,6 +3,6 @@
 フェーズ A では構成配信 (アンカー座標の管理と `GET /api/v1/config`) だけを提供する。
 """
 
-__all__ = ["__version__"]
+from location_server.version import __version__, get_version
 
-__version__ = "0.1.0"
+__all__ = ["__version__", "get_version"]

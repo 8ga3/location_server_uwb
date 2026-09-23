@@ -3,6 +3,8 @@
 UWB 測位のデバッグ・精度評価に使うサーバーである。アンカーの ID と設置座標を保持してタグへ配信し、
 タグから送られてくる測距結果と自己位置推定結果を蓄積して可視化する。
 
+バージョン: `0.1.0-dev`
+
 設計の正本は [doc/server-design.md](doc/server-design.md) である。実装と文書が食い違う変更は行わない。
 
 `doc/` 以下の設計メモは、タグ側 (ファームウェア) の
@@ -47,6 +49,13 @@ uv sync
 
 ```sh
 uv run python -m location_server --db data/2026-09-21-run1.db --port 8000
+```
+
+バージョンは `--version` で確認できる。起動時にもログの先頭へ
+`SERVER_VERSION,version=...` として出力する。
+
+```sh
+uv run python -m location_server --version
 ```
 
 設定は環境変数でも与えられる。
@@ -113,3 +122,10 @@ npx markdownlint-cli2  # Markdown の lint
 # doc/ がファームウェア側リポジトリと一致しているかの確認
 uv run python tools/check_doc_sync.py ../m5atom_uwb_ds_twr
 ```
+
+バージョン番号の単一の情報源は `pyproject.toml` の `[project]` にある `version` である。
+README 冒頭の記載と同じ値にする。運用方針は [AGENTS.md](AGENTS.md) の「バージョン管理」を参照。
+
+## License
+
+MIT License。詳細は [LICENSE](LICENSE) を参照。

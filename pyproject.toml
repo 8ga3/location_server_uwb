@@ -1,8 +1,11 @@
 [project]
 name = "location-server-uwb"
-version = "0.1.0"
+version = "0.1.0-dev"
 description = "UWB 測位デバッグ用の構成配信・テレメトリ収集サーバー"
+readme = "README.md"
 requires-python = ">=3.14"
+license = "MIT"
+license-files = ["LICENSE"]
 dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.34",

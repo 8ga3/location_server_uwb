@@ -30,6 +30,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        # ファームウェア側が起動時にシリアルへ FW_VERSION を出すのと同じ意図で、
+        # 起動したサーバーのバージョンをログの先頭に残す
+        logger.info("SERVER_VERSION,version=%s", __version__)
         conn = connect(resolved.db_path)
         version = migrate(conn)
         app.state.settings = resolved

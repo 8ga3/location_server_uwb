@@ -10,6 +10,32 @@
 - コミットメッセージと PR 本文も同様に通常の日本語または英語で書く
 - 既存ファイルの文体に合わせる。英語で書かれているコメントを日本語へ書き換えることはしない
 
+## バージョン管理
+
+サーバーのバージョンは [SemVer](https://semver.org/lang/ja/) に従い `MAJOR.MINOR.PATCH` 形式で管理する。開発中のバージョンには `-dev` サフィックスを付ける (例: `0.1.0-dev`)。
+
+- バージョン番号の単一の情報源は `pyproject.toml` の `[project]` セクションにある `version`。
+  `src/location_server/version.py` が `importlib.metadata` 経由でこの値を読み出し、起動時にログへ
+  `SERVER_VERSION,version=...` として出力する。`GET /healthz` と `--version` も同じ値を返す
+- コード中にバージョン文字列を直接書かない。参照するときは `location_server.__version__` を使う
+- README.md 冒頭の記載バージョンは `pyproject.toml` の値と一致させる。バージョンを変更するときは同じ
+  コミットで両方を更新する。`tests/test_version.py` がこの一致を検証する
+- 初期バージョンは `0.1.0-dev`
+- リリース (`-dev` サフィックスを外す) するコミットには `vMAJOR.MINOR.PATCH` の git tag を打つ
+- 最初のリリースまでは `main` ブランチで直接開発する (現状)。最初のリリース以降は `develop` ブランチで開発し、
+  バージョンは次にリリース予定のバージョンに `-dev` を付けたものにする (例: `v0.1.0` リリース後、次が `0.2.0`
+  予定なら `0.2.0-dev`)
+- リリース手順: `develop` の変更を `main` にマージ → バージョンから `-dev` を外す → `vMAJOR.MINOR.PATCH` の tag
+  を打つ → `develop` 側のバージョンを次の開発バージョン (`{次のバージョン}-dev`) に上げる
+
+なお `0.1.0-dev` は PEP 440 では `0.1.0.dev0` に正規化される。実行時に `importlib.metadata` が返す値と
+`pyproject.toml` の記載はどちらも `0.1.0-dev` のままで一致するが、ビルドした wheel のファイル名だけは
+正規化後の表記になる。配布物を作る場面ではこの差を前提にする。
+
+## ライセンス
+
+MIT License とする。ファームウェア側リポジトリと同じ著作権表示を使い、`LICENSE` の内容を揃えておく。
+
 ## 設計の基準
 
 開発は [`doc/server-design.md`](doc/server-design.md) に準ずる。同文書を本リポジトリの設計上の正本として扱い、

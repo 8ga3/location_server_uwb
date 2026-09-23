@@ -8,6 +8,7 @@ from pathlib import Path
 
 import uvicorn
 
+from location_server import __version__
 from location_server.api import create_app
 from location_server.settings import Settings, load_settings
 
@@ -17,6 +18,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         prog="location-server",
         description="UWB 測位デバッグ用の構成配信サーバーを起動する",
     )
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument("--db", type=Path, default=None, help="SQLite ファイルのパス")
     parser.add_argument("--host", default=None, help="待ち受けアドレス")
     parser.add_argument("--port", type=int, default=None, help="待ち受けポート")
