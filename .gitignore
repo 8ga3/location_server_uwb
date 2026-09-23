@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 実験ごとの SQLite ファイル。持ち出しは手で行う (設計文書 9 節)
+data/
+*.db
+*.db-wal
+*.db-shm
