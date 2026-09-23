@@ -11,16 +11,20 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from location_server.api.auth import require_write_token
 from location_server.api.deps import get_store
 from location_server.api.schemas import AnchorListOut, AnchorPut, AnchorPutOut, to_anchor_out
-from location_server.units import ValueRangeError, check_anchor_id, parse_hex_id
+from location_server.units import check_anchor_id, parse_hex_id
 
 router = APIRouter(prefix="/api/v1", tags=["anchors"])
 
 
 def _parse_anchor_id(raw: str) -> int:
-    """パスパラメータのアンカー ID を解釈する。`0x0100` 形式と 10 進数表記を受け付ける。"""
+    """パスパラメータのアンカー ID を解釈する。`0x0100` 形式と 10 進数表記を受け付ける。
+
+    `ValueRangeError` だけでなく `ValueError` 全般を 400 に落とす。ID の解釈は
+    `parse_hex_id` 側で完結しているが、未処理例外が 500 として漏れないよう二重に受ける。
+    """
     try:
         return check_anchor_id(parse_hex_id(raw))
-    except ValueRangeError as exc:
+    except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
 
@@ -41,7 +45,7 @@ def put_anchor(request: Request, response: Response, anchor_id: str, body: Ancho
     parsed_id = _parse_anchor_id(anchor_id)
     try:
         x_mm, y_mm, z_mm = body.to_mm()
-    except ValueRangeError as exc:
+    except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
     store = get_store(request)
