@@ -5,6 +5,19 @@ UWB 測位のデバッグ・精度評価に使うサーバーである。アン�
 
 設計の正本は [doc/server-design.md](doc/server-design.md) である。実装と文書が食い違う変更は行わない。
 
+`doc/` 以下の設計メモは、タグ側 (ファームウェア) の
+[m5atom_uwb_ds_twr](https://github.com/8ga3/m5atom_uwb_ds_twr) リポジトリと同じ内容を保つ。
+片方だけを書き換えない。
+
+- [doc/server-design.md](doc/server-design.md) - 測位サーバーの設計メモ (本リポジトリの正本)
+- [doc/multi-anchor-positioning-design.md](doc/multi-anchor-positioning-design.md) -
+  マルチアンカー UWB 測位システムの設計メモ
+- [doc/downlink-tdoa-design.md](doc/downlink-tdoa-design.md) - Downlink-TDoA 方式の設計メモ
+
+後ろの 2 文書はタグ側 (ファームウェア) の設計であり、本リポジトリの実装対象ではない。
+サーバーの設計判断がタグ側の前提に依存するため、参照できるように置いている。
+文中の `../src/` へのリンクはファームウェア側のソースを指すので、本リポジトリでは解決しない。
+
 ## 実装状況
 
 フェーズ A (構成配信) までを実装している。
@@ -96,4 +109,7 @@ uv run ruff check .    # lint
 uv run ruff format .   # 整形
 uv run mypy src tools tests   # 型チェック
 npx markdownlint-cli2  # Markdown の lint
+
+# doc/ がファームウェア側リポジトリと一致しているかの確認
+uv run python tools/check_doc_sync.py ../m5atom_uwb_ds_twr
 ```

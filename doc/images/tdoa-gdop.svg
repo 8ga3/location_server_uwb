@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 400" width="720" height="400" font-family="Helvetica, Arial, sans-serif">
+  <title>TDoA の幾何感度 (GDOP): アンカー凸包の内側と外側</title>
+
+  <rect x="0" y="0" width="100%" height="100%" rx="10" fill="#f6f8fa"/>
+
+  <text x="40" y="34" fill="#3d4a56" font-size="15">TDoA の誤差はアンカー配置に強く依存する。凸包の外では誤差楕円が伸びる</text>
+
+  <!-- アンカー凸包 -->
+  <polygon points="140,90 460,90 460,330 140,330" fill="#2e86c1" fill-opacity="0.07" stroke="#2e86c1" stroke-width="1.5" stroke-dasharray="6 4"/>
+
+  <!-- アンカー -->
+  <rect x="128" y="78" width="24" height="24" rx="4" fill="#2e86c1"/>
+  <rect x="448" y="78" width="24" height="24" rx="4" fill="#2e86c1"/>
+  <rect x="128" y="318" width="24" height="24" rx="4" fill="#2e86c1"/>
+  <rect x="448" y="318" width="24" height="24" rx="4" fill="#2e86c1"/>
+  <text x="140" y="70" fill="#3d4a56" font-size="13" text-anchor="middle">A0</text>
+  <text x="460" y="70" fill="#3d4a56" font-size="13" text-anchor="middle">A1</text>
+  <text x="140" y="362" fill="#3d4a56" font-size="13" text-anchor="middle">A2</text>
+  <text x="460" y="362" fill="#3d4a56" font-size="13" text-anchor="middle">A3</text>
+
+  <!-- 凸包内のタグ: 小さな誤差円 -->
+  <ellipse cx="295" cy="205" rx="18" ry="15" fill="#27ae60" fill-opacity="0.25" stroke="#27ae60" stroke-width="1.5"/>
+  <circle cx="295" cy="205" r="5" fill="#27ae60"/>
+  <text x="295" y="245" fill="#27ae60" font-size="13" text-anchor="middle">凸包内: 10 - 20 cm</text>
+
+  <!-- 凸包外のタグ: 伸びた誤差楕円 -->
+  <ellipse cx="600" cy="205" rx="72" ry="17" fill="#c0392b" fill-opacity="0.2" stroke="#c0392b" stroke-width="1.5"/>
+  <circle cx="600" cy="205" r="5" fill="#c0392b"/>
+  <text x="600" y="250" fill="#c0392b" font-size="13" text-anchor="middle">凸包外: 50 cm 超</text>
+  <text x="600" y="270" fill="#6b7785" font-size="12" text-anchor="middle">基線方向に伸びる</text>
+
+  <!-- 境界注記 -->
+  <line x1="460" y1="90" x2="460" y2="330" stroke="#c0392b" stroke-width="1" opacity="0.4"/>
+  <text x="40" y="380" fill="#6b7785" font-size="13">対策: 測位エリアを凸包の内側に収める / アンカーを 5 - 6 台に増やして基線の向きを分散させる</text>
+</svg>

@@ -15,6 +15,19 @@
 開発は [`doc/server-design.md`](doc/server-design.md) に準ずる。同文書を本リポジトリの設計上の正本として扱い、
 実装と文書が食い違う変更を行わない。
 
+`doc/` 以下の 3 つの設計メモ (`server-design.md`、`multi-anchor-positioning-design.md`、
+`downlink-tdoa-design.md`) と `doc/images/` は、タグ側 (ファームウェア) の `m5atom_uwb_ds_twr` リポジトリと
+同一の内容を保つ。
+
+- どちらか一方の文書だけを書き換えない。変更するときは両リポジトリへ同じ内容を入れる
+- 文書への変更を含む作業では、作業の最後に `uv run python tools/check_doc_sync.py ../m5atom_uwb_ds_twr` で
+  一致を確認する
+- `multi-anchor-positioning-design.md` と `downlink-tdoa-design.md` はタグ側の設計であり、
+  本リポジトリの実装対象ではない。サーバーの設計判断がタグ側の前提に依存するため参照用に置いている
+- 文中の `../src/` へのリンクはファームウェア側のソースを指す。本リポジトリでは解決しないが、
+  両者を同一に保つため書き換えない
+- `tools/check_doc_sync.py` 自体も両リポジトリで同一に保つ
+
 - 設計変更が必要な場合は、実装だけを先行させず `doc/server-design.md` も同じ変更で更新する
 - 未決事項を独断で確定しない。実装に判断が必要な場合は確認を取るか、設計文書へ決定理由を追記する
 - 実装ロードマップのフェーズと依存関係を尊重する。後続フェーズの都合で前段の責務を崩さない

@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 400" width="720" height="400" font-family="Helvetica, Arial, sans-serif">
+  <title>TDoA の原理: 2 アンカーからの到達時刻差が双曲線を描く</title>
+
+  <rect x="0" y="0" width="100%" height="100%" rx="10" fill="#f6f8fa"/>
+
+  <!-- 双曲線: 焦点 A0(210,200) / A1(510,200), 2a = 180 -->
+  <path d="M 516,30 L 499,59 L 480,93 L 467,124 L 457,151 L 452,176 L 450,200 L 452,224 L 457,249 L 467,276 L 480,307 L 499,341 L 516,370"
+        fill="none" stroke="#2e86c1" stroke-width="2.5"/>
+  <path d="M 204,30 L 221,59 L 240,93 L 253,124 L 263,151 L 268,176 L 270,200 L 268,224 L 263,249 L 253,276 L 240,307 L 221,341 L 204,370"
+        fill="none" stroke="#2e86c1" stroke-width="1.5" stroke-dasharray="5 5" opacity="0.5"/>
+
+  <!-- 焦点間の基線 -->
+  <line x1="210" y1="200" x2="510" y2="200" stroke="#6b7785" stroke-width="1" stroke-dasharray="3 4"/>
+
+  <!-- タグへの経路 -->
+  <line x1="210" y1="200" x2="467" y2="124" stroke="#c0392b" stroke-width="1.8"/>
+  <line x1="510" y1="200" x2="467" y2="124" stroke="#e67e22" stroke-width="1.8"/>
+
+  <!-- アンカー -->
+  <rect x="198" y="188" width="24" height="24" rx="4" fill="#2e86c1"/>
+  <rect x="498" y="188" width="24" height="24" rx="4" fill="#2e86c1"/>
+  <text x="210" y="238" fill="#3d4a56" font-size="14" text-anchor="middle">Anchor 0</text>
+  <text x="510" y="238" fill="#3d4a56" font-size="14" text-anchor="middle">Anchor 1</text>
+
+  <!-- タグ -->
+  <circle cx="467" cy="124" r="9" fill="#c0392b"/>
+  <text x="467" y="105" fill="#3d4a56" font-size="14" text-anchor="middle">Tag</text>
+
+  <!-- 距離ラベル -->
+  <text x="320" y="150" fill="#c0392b" font-size="14">r0</text>
+  <text x="497" y="165" fill="#e67e22" font-size="14">r1</text>
+
+  <!-- 説明 -->
+  <text x="40" y="36" fill="#3d4a56" font-size="15">到達時刻差 &#916;t = (r0 - r1) / c が一定 &#8594; タグは双曲線上のどこか</text>
+  <text x="40" y="58" fill="#3d4a56" font-size="15">アンカーをもう 1 組増やすと双曲線が交わり、位置が 1 点に定まる</text>
+  <text x="40" y="380" fill="#6b7785" font-size="13">実線 = r0 - r1 = +180 の枝 / 破線 = 符号が逆の枝 (解の曖昧性。3 局目で除去)</text>
+</svg>
