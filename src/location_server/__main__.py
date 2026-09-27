@@ -10,18 +10,21 @@ import uvicorn
 
 from location_server import __version__
 from location_server.api import create_app
-from location_server.settings import Settings, load_settings
+from location_server.settings import Settings, load_settings, udp_port_setting
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="location-server",
-        description="UWB 測位デバッグ用の構成配信サーバーを起動する",
+        description="UWB 測位デバッグ用の構成配信・テレメトリ収集サーバーを起動する",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument("--db", type=Path, default=None, help="SQLite ファイルのパス")
     parser.add_argument("--host", default=None, help="待ち受けアドレス")
     parser.add_argument("--port", type=int, default=None, help="待ち受けポート")
+    parser.add_argument(
+        "--udp-port", type=int, default=None, help="テレメトリの UDP 受信ポート (0 で受信しない)"
+    )
     parser.add_argument("--log-level", default="info", help="uvicorn のログレベル")
     return parser.parse_args(argv)
 
@@ -34,6 +37,7 @@ def main(argv: list[str] | None = None) -> int:
         host=base.host if args.host is None else args.host,
         port=base.port if args.port is None else args.port,
         auth_token=base.auth_token,
+        udp_port=base.udp_port if args.udp_port is None else udp_port_setting(args.udp_port),
     )
     logging.basicConfig(level=args.log_level.upper())
     uvicorn.run(create_app(settings), host=settings.host, port=settings.port, log_level=args.log_level)

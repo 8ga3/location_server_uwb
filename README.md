@@ -22,17 +22,17 @@ UWB 測位のデバッグ・精度評価に使うサーバーである。アン�
 
 ## 実装状況
 
-フェーズ A (構成配信) までを実装している。
+フェーズ B (テレメトリ収集) までを実装している。
 
 | フェーズ | 内容 | 状態 |
 | --- | --- | --- |
 | A | SQLite スキーマ、構成配信 API、アンカー管理 API、座標入力 CLI | 実装済み |
-| B | UDP によるテレメトリ収集 | 未着手 |
+| B | UDP によるテレメトリ収集、セッション開始通知、UDP ダンパ | 実装済み (実機での実測は未了) |
 | C | ライブ配信と可視化ページ | 未着手 |
 | D | self-survey 連携 | 未着手 |
 
-フェーズ A のうち「タグ側の Wi-Fi 取得 + NVS キャッシュ」はファームウェア側の作業であり、
-このリポジトリには含まれない。
+フェーズ A の「タグ側の Wi-Fi 取得 + NVS キャッシュ」と、フェーズ B の「タグ側のリングバッファと UDP 送信」
+「測距ループと Wi-Fi 監視のコア分離」はファームウェア側の作業であり、このリポジトリには含まれない。
 
 ## 必要なもの
 
@@ -66,6 +66,7 @@ uv run python -m location_server --version
 | `UWB_HOST` | `0.0.0.0` | 待ち受けアドレス |
 | `UWB_PORT` | `8000` | 待ち受けポート |
 | `UWB_AUTH_TOKEN` | (未設定) | 設定すると書き込み系 API に `X-Auth-Token` ヘッダを要求する |
+| `UWB_UDP_PORT` | `47100` | テレメトリの UDP 受信ポート (`--udp-port`)。`0` で受信しない。待ち受けアドレスは `UWB_HOST` と共通 |
 
 コマンドライン引数を与えた場合は環境変数より優先される。
 
@@ -76,6 +77,7 @@ uv run python -m location_server --version
 | `GET` | `/api/v1/config` | タグへ配る構成一式。`ETag` / `If-None-Match` による `304` に対応する |
 | `GET` | `/api/v1/config/revisions/{rev}` | 過去のリビジョン時点の構成 |
 | `PUT` | `/api/v1/config/telemetry` | テレメトリ送信先と `batch_cycles` の更新 |
+| `POST` | `/api/v1/hello` | タグのセッション開始通知。共有トークンは要求しない |
 | `GET` | `/api/v1/anchors` | アンカー一覧。無効化されているものも含む |
 | `PUT` | `/api/v1/anchors/{id}` | アンカー 1 台の登録・更新 |
 | `GET` | `/healthz` | 死活確認 |
@@ -109,6 +111,26 @@ uv run python tools/anchor_cli.py config
 
 接続先は `--server` または環境変数 `UWB_SERVER_URL` で変えられる。
 `UWB_AUTH_TOKEN` を設定してサーバーを起動している場合は、CLI 側にも同じ環境変数か `--token` を与える。
+
+## テレメトリの収集
+
+サーバーは起動すると UDP の `47100` 番でタグからのテレメトリを待ち受け、100 ms ごと (または 500 行ごと) に
+まとめて SQLite へ書き込む。タグに送信させるには、`telemetry` コマンドで送信先をサーバーの IP と受信ポートへ向ける。
+受信ポートと構成の送信先ポートが食い違っていると、起動時に警告が出る。
+
+受信状況は 10 秒ごとに `INGEST_STATS,...` の 1 行としてログへ出る。`rejected` は形式が合わずに捨てたパケット、
+`lost_cycles` は `seq` の欠番 (UDP で落ちたサイクル)、`dropped_packets` は DB が詰まって保存を諦めたパケットの数である。
+
+`tools/dump_udp.py` はパケットを受信してデコードし、1 サイクル 1 行で表示する。サーバーと同じポートは
+同時に待ち受けられないので、サーバーを止めるか別のポートで使う。`send` はタグの代わりに擬似パケットを送る。
+
+```sh
+# 受信した内容を表示する
+uv run python tools/dump_udp.py listen --port 47100
+
+# 擬似タグとして 40 サイクル (4 サイクルずつ束ねて) 送る
+uv run python tools/dump_udp.py send --host 127.0.0.1 --port 47100 --cycles 40
+```
 
 ## 開発
 

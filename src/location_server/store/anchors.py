@@ -11,7 +11,7 @@ import sqlite3
 import threading
 from typing import NamedTuple
 
-from location_server.db import utc_now_text
+from location_server.db import Transaction, utc_now_text
 from location_server.models import ANCHOR_SOURCE_MANUAL, Anchor, ConfigMeta, ConfigSnapshot
 from location_server.units import check_anchor_id
 
@@ -32,11 +32,12 @@ class ConfigStore:
     """構成配信に使う表への単一ライターなアクセス経路。
 
     SQLite は単一ライターで運用するため、書き込みを含む操作はロックで直列化する。
+    同じ接続をテレメトリの保存 (`TelemetryStore`) と共有する場合は、`lock` に同じロックを渡す。
     """
 
-    def __init__(self, conn: sqlite3.Connection) -> None:
+    def __init__(self, conn: sqlite3.Connection, lock: threading.Lock | None = None) -> None:
         self._conn = conn
-        self._lock = threading.Lock()
+        self._lock = lock if lock is not None else threading.Lock()
 
     # ------------------------------------------------------------------ 参照
 
@@ -163,8 +164,8 @@ class ConfigStore:
 
     # ------------------------------------------------------------- 内部処理
 
-    def _transaction(self) -> _Transaction:
-        return _Transaction(self._conn)
+    def _transaction(self) -> Transaction:
+        return Transaction(self._conn)
 
     def _current_meta(self) -> ConfigMeta:
         row = self._conn.execute("SELECT * FROM config_meta ORDER BY rev DESC LIMIT 1").fetchone()
@@ -226,20 +227,3 @@ class ConfigStore:
             """,
             [(rev, a.id, a.label, a.x_mm, a.y_mm, a.z_mm, int(a.enabled), a.source) for a in anchors],
         )
-
-
-class _Transaction:
-    """`BEGIN IMMEDIATE` から `COMMIT` / `ROLLBACK` までを囲むコンテキスト。"""
-
-    def __init__(self, conn: sqlite3.Connection) -> None:
-        self._conn = conn
-
-    def __enter__(self) -> _Transaction:
-        self._conn.execute("BEGIN IMMEDIATE")
-        return self
-
-    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
-        if exc_type is None:
-            self._conn.execute("COMMIT")
-        else:
-            self._conn.execute("ROLLBACK")

@@ -94,3 +94,20 @@ def migrate(conn: sqlite3.Connection) -> int:
         conn.execute("COMMIT")
         current = version
     return current
+
+
+class Transaction:
+    """`BEGIN IMMEDIATE` から `COMMIT` / `ROLLBACK` までを囲むコンテキスト。"""
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self._conn = conn
+
+    def __enter__(self) -> Transaction:
+        self._conn.execute("BEGIN IMMEDIATE")
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        if exc_type is None:
+            self._conn.execute("COMMIT")
+        else:
+            self._conn.execute("ROLLBACK")

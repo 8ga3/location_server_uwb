@@ -172,3 +172,52 @@ def test_write_requires_token_when_configured(token_client: TestClient) -> None:
         json={"host": "192.168.1.10", "port": 47100, "batch_cycles": 4},
     )
     assert telemetry.status_code == 401
+
+
+def test_telemetry_batch_cycles_limited_to_packet_count(client: TestClient) -> None:
+    # パケット形式の count 上限 (設計文書 6.2) を超える束ね数はタグへ配れない
+    ok = client.put(
+        "/api/v1/config/telemetry", json={"host": "192.168.1.10", "port": 47100, "batch_cycles": 16}
+    )
+    assert ok.status_code == 200
+    too_many = client.put(
+        "/api/v1/config/telemetry", json={"host": "192.168.1.10", "port": 47100, "batch_cycles": 17}
+    )
+    assert too_many.status_code == 422
+
+
+HELLO_BODY = {"tag_id": 1, "boot_id": 2863311530, "fw_version": "0.1.0-dev", "config_rev": 1}
+
+
+def test_hello_creates_session(client: TestClient) -> None:
+    first = client.post("/api/v1/hello", json=HELLO_BODY)
+    assert first.status_code == 200
+    session_id = first.json()["session_id"]
+    # 同じ起動からの再送は同じセッションになる
+    again = client.post("/api/v1/hello", json=HELLO_BODY)
+    assert again.json() == {"session_id": session_id}
+    other = client.post("/api/v1/hello", json={**HELLO_BODY, "boot_id": 1})
+    assert other.json()["session_id"] != session_id
+
+
+def test_hello_accepts_minimal_body(client: TestClient) -> None:
+    response = client.post("/api/v1/hello", json={"tag_id": 1, "boot_id": 0})
+    assert response.status_code == 200
+
+
+def test_hello_validates_body(client: TestClient) -> None:
+    for patch in (
+        {"tag_id": 0},
+        {"tag_id": 256},
+        {"boot_id": -1},
+        {"boot_id": 2**32},
+        {"config_rev": 0},
+        {"fw_version": "x" * 65},
+        {"unknown": 1},
+    ):
+        assert client.post("/api/v1/hello", json={**HELLO_BODY, **patch}).status_code == 422, patch
+
+
+def test_hello_does_not_require_token(token_client: TestClient) -> None:
+    # タグはトークンを持たないので、hello は管理 API の共有トークンの対象外
+    assert token_client.post("/api/v1/hello", json=HELLO_BODY).status_code == 200
