@@ -63,6 +63,7 @@ class TelemetryWriter:
         self._pending: deque[ReceivedPacket] = deque()
         self._pending_rows = 0
         self._wakeup = asyncio.Event()
+        self._stopping = False
         self.stats = WriterStats()
 
     @property
@@ -88,13 +89,25 @@ class TelemetryWriter:
         if self._pending_rows >= self._flush_rows:
             self._wakeup.set()
 
+    def request_stop(self) -> None:
+        """`run()` に終了を求める。`run()` は残りを書き切ってから戻る。"""
+        self._stopping = True
+        self._wakeup.set()
+
     async def run(self) -> None:
-        """一定間隔、または行数が閾値に達するたびにキューを吐き出し続ける。"""
-        while True:
+        """一定間隔、または行数が閾値に達するたびにキューを吐き出し続ける。
+
+        止めるときはタスクを cancel せず、`request_stop()` を呼んでから終わるのを待つ。
+        `asyncio.to_thread()` の待ちを cancel しても DB スレッドは止まらないので、
+        書き込みの途中で接続を閉じてしまわないよう、書き込みの完了を必ずここで待つ。
+        """
+        while not self._stopping:
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(self._wakeup.wait(), timeout=self._flush_interval_s)
             self._wakeup.clear()
             await self.flush()
+        # 停止を求められた時点でキューに残っているぶんを書き切る
+        await self.flush()
 
     async def flush(self) -> None:
         """溜まっているぶんを 1 トランザクションで書き込む。"""

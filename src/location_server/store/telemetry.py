@@ -67,13 +67,14 @@ class TelemetryStore:
         """セッション開始通知を記録し、セッション ID を返す。
 
         UDP の受信で先にセッションが作られていた場合も、`fw_version` と `config_rev` を書き足す。
+        本文で省略された (`None` の) 項目は、既に記録されている値を消さずに残す。
         """
         with self._lock, Transaction(self._conn):
             row = self._conn.execute(
                 """
                 UPDATE session SET
-                    config_rev = ?,
-                    fw_version = ?,
+                    config_rev = coalesce(?, config_rev),
+                    fw_version = coalesce(?, fw_version),
                     last_seen_at = max(last_seen_at, ?)
                 WHERE tag_id = ? AND boot_id = ?
                 RETURNING id
@@ -123,18 +124,23 @@ class TelemetryStore:
     # ------------------------------------------------------------- 内部処理
 
     def _touch_session(self, key: tuple[int, int], first_seen: str, last_seen: str) -> int:
-        """セッションが無ければ作り、あれば `last_seen_at` を進めて ID を返す。
+        """セッションが無ければ作り、あれば受信時刻の範囲を広げて ID を返す。
 
-        受信の順序は保証されないので、`last_seen_at` は大きいほうを残す。
+        受信の順序は保証されないので、`started_at` は小さいほう、`last_seen_at` は大きいほうを残す。
+        UDP をキューへ積んでから書き込むまでの間に hello が先に行を作った場合も、
+        `started_at` は UDP を最初に受けた時刻まで戻る。時刻はどちらも `utc_now_text()` の
+        同じ書式なので、文字列の大小が時刻の前後と一致する。
         """
         tag_id, boot_id = key
         row = self._conn.execute(
             """
-            UPDATE session SET last_seen_at = max(last_seen_at, ?)
+            UPDATE session SET
+                started_at = min(started_at, ?),
+                last_seen_at = max(last_seen_at, ?)
             WHERE tag_id = ? AND boot_id = ?
             RETURNING id
             """,
-            (last_seen, tag_id, boot_id),
+            (first_seen, last_seen, tag_id, boot_id),
         ).fetchone()
         if row is None:
             row = self._conn.execute(
@@ -150,6 +156,9 @@ class TelemetryStore:
 
     def _insert_cycle(self, session_id: int, cycle: CycleRecord, recv_at: str) -> int:
         """1 サイクルぶんの測位 1 行と測距 N 行を挿入し、挿入できた行数を返す。
+
+        同じ `(session_id, seq)` の測位行が既にあれば、そのサイクルは測距行も含めて丸ごと捨てる。
+        先に届いたサイクルへ、後から届いたパケットの測距行が混ざらないようにするためである。
 
         測位に失敗したサイクルは座標と方式を NULL にする。タグは失敗時の座標欄に意味のある値を
         入れないためで、成功したサイクルの値は発散していてもそのまま残す。
@@ -177,6 +186,8 @@ class TelemetryStore:
                 method,
             ),
         )
+        if cursor.rowcount == 0:
+            return 0
         inserted = cursor.rowcount
         cursor = self._conn.executemany(
             """

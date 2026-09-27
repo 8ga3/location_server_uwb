@@ -192,6 +192,40 @@ def test_writer_discards_failed_batch_and_continues() -> None:
     asyncio.run(scenario())
 
 
+class _SlowStore(_FakeStore):
+    """書き込みに時間がかかる DB を模す。書き込みの途中かどうかを外から見られるようにする。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = threading.Event()
+        self.finished = threading.Event()
+
+    def write_packets(self, received: list[ReceivedPacket]) -> WriteResult:
+        self.started.set()
+        time.sleep(0.2)
+        result = super().write_packets(received)
+        self.finished.set()
+        return result
+
+
+def test_writer_stop_waits_for_in_flight_write() -> None:
+    # 書き込み中に停止を求めても、DB スレッドの書き込みが終わってから run() が戻る。
+    # 戻った直後に接続を閉じても、書き込みと競合しない
+    async def scenario() -> None:
+        store = _SlowStore()
+        writer = _writer(store, flush_interval_s=0.01)
+        task = asyncio.create_task(writer.run())
+        writer.submit(_item(seq=0))
+        await asyncio.to_thread(store.started.wait, 1.0)
+        writer.submit(_item(seq=4))  # 書き込み中に届いたぶんも停止時に書き切る
+        writer.request_stop()
+        await task
+        assert store.finished.is_set()
+        assert [len(batch) for batch in store.batches] == [1, 1]
+
+    asyncio.run(scenario())
+
+
 def test_writer_with_real_store(conn: sqlite3.Connection) -> None:
     async def scenario() -> None:
         writer = TelemetryWriter(TelemetryStore(conn, threading.Lock()))
