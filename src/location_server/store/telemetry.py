@@ -1,0 +1,175 @@
+"""セッションとテレメトリ (測距・測位) の書き込み。
+
+タグの 1 回の起動を `(tag_id, boot_id)` で識別する 1 セッションとして扱う (設計文書 4.2)。
+セッション行は `POST /api/v1/hello` か、UDP パケットを最初に受けた時点のどちらか早いほうで作る。
+後から届いたほうは既存の行へ足りない情報を書き足すだけで、`started_at` は動かさない。
+
+受信したパケットはまとめて 1 トランザクションで書く (設計文書 6.3)。同じ `(session_id, seq)` を
+もう一度受けた場合は先に書いた行を残し、後から届いたものは捨てる。UDP の重複配送や、
+タグ側の再送ではない偶然の重複で行が書き換わらないようにするためである。
+"""
+
+from __future__ import annotations
+
+import sqlite3
+import threading
+from collections.abc import Sequence
+from dataclasses import dataclass
+
+from location_server.db import Transaction
+from location_server.ingest.packet import CycleRecord, TelemetryPacket
+
+METHOD_TRILAT2D = "trilat2d"
+METHOD_TRILAT3D = "trilat3d"
+
+
+@dataclass(frozen=True, slots=True)
+class ReceivedPacket:
+    """受信時刻を添えたパケット。`recv_at` はサーバーの壁時計 (ISO 8601)。"""
+
+    packet: TelemetryPacket
+    recv_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class WriteResult:
+    """1 回の一括書き込みの結果。`rows` は実際に挿入された行数 (重複で捨てた行は含まない)。"""
+
+    packets: int
+    rows: int
+    duplicate_rows: int
+    sessions: dict[tuple[int, int], int]
+
+
+class TelemetryStore:
+    """セッション表とテレメトリ表への単一ライターなアクセス経路。
+
+    構成ストアと同じ接続・同じロックを共有して使う。
+    """
+
+    def __init__(self, conn: sqlite3.Connection, lock: threading.Lock) -> None:
+        self._conn = conn
+        self._lock = lock
+
+    def hello(
+        self,
+        *,
+        tag_id: int,
+        boot_id: int,
+        fw_version: str | None,
+        config_rev: int | None,
+        now: str,
+    ) -> int:
+        """セッション開始通知を記録し、セッション ID を返す。
+
+        UDP の受信で先にセッションが作られていた場合も、`fw_version` と `config_rev` を書き足す。
+        """
+        with self._lock, Transaction(self._conn):
+            row = self._conn.execute(
+                """
+                INSERT INTO session (tag_id, boot_id, config_rev, fw_version, started_at, last_seen_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT (tag_id, boot_id) DO UPDATE SET
+                    config_rev = excluded.config_rev,
+                    fw_version = excluded.fw_version,
+                    last_seen_at = max(session.last_seen_at, excluded.last_seen_at)
+                RETURNING id
+                """,
+                (tag_id, boot_id, config_rev, fw_version, now, now),
+            ).fetchone()
+        session_id: int = row[0]
+        return session_id
+
+    def write_packets(self, received: Sequence[ReceivedPacket]) -> WriteResult:
+        """パケット群を 1 トランザクションで書き込む。
+
+        途中で失敗した場合はトランザクション全体を巻き戻して例外をそのまま送出する。
+        呼び出し側 (`TelemetryWriter`) がその束を破棄して数える。
+        """
+        rows = 0
+        attempted = 0
+        sessions: dict[tuple[int, int], int] = {}
+        with self._lock, Transaction(self._conn):
+            for item in received:
+                packet = item.packet
+                key = (packet.tag_id, packet.boot_id)
+                session_id = self._touch_session(key, item.recv_at)
+                sessions[key] = session_id
+                for cycle in packet.cycles:
+                    attempted += 1 + len(cycle.ranges)
+                    rows += self._insert_cycle(session_id, cycle, item.recv_at)
+        return WriteResult(
+            packets=len(received), rows=rows, duplicate_rows=attempted - rows, sessions=sessions
+        )
+
+    # ------------------------------------------------------------- 内部処理
+
+    def _touch_session(self, key: tuple[int, int], recv_at: str) -> int:
+        """セッションが無ければ作り、あれば `last_seen_at` を進めて ID を返す。
+
+        受信の順序は保証されないので、`last_seen_at` は大きいほうを残す。
+        """
+        tag_id, boot_id = key
+        row = self._conn.execute(
+            """
+            INSERT INTO session (tag_id, boot_id, started_at, last_seen_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT (tag_id, boot_id) DO UPDATE SET
+                last_seen_at = max(session.last_seen_at, excluded.last_seen_at)
+            RETURNING id
+            """,
+            (tag_id, boot_id, recv_at, recv_at),
+        ).fetchone()
+        session_id: int = row[0]
+        return session_id
+
+    def _insert_cycle(self, session_id: int, cycle: CycleRecord, recv_at: str) -> int:
+        """1 サイクルぶんの測位 1 行と測距 N 行を挿入し、挿入できた行数を返す。
+
+        測位に失敗したサイクルは座標と方式を NULL にする。タグは失敗時の座標欄に意味のある値を
+        入れないためで、成功したサイクルの値は発散していてもそのまま残す。
+        測距も同様に、`status != 0` のときは距離を NULL にする (設計文書 4.1)。
+        """
+        ok = cycle.fix_ok
+        method = (METHOD_TRILAT3D if cycle.fix_3d else METHOD_TRILAT2D) if ok else None
+        cursor = self._conn.execute(
+            """
+            INSERT OR IGNORE INTO position_fix
+                (session_id, seq, t_tag_ms, recv_at, ok, x_mm, y_mm, z_mm, used_count, residual_mm, method)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                session_id,
+                cycle.seq,
+                cycle.t_tag_ms,
+                recv_at,
+                int(ok),
+                cycle.x_mm if ok else None,
+                cycle.y_mm if ok else None,
+                cycle.z_mm if ok else None,
+                cycle.used_count,
+                cycle.residual_mm,
+                method,
+            ),
+        )
+        inserted = cursor.rowcount
+        cursor = self._conn.executemany(
+            """
+            INSERT OR IGNORE INTO range_sample
+                (session_id, seq, t_tag_ms, anchor_id, status, distance_mm, elapsed_ms)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    session_id,
+                    cycle.seq,
+                    cycle.t_tag_ms,
+                    r.anchor_id,
+                    r.status,
+                    r.distance_mm if r.ok else None,
+                    r.elapsed_ms,
+                )
+                for r in cycle.ranges
+            ],
+        )
+        return inserted + cursor.rowcount

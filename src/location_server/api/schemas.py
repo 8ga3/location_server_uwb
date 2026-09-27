@@ -10,12 +10,22 @@ from typing import Annotated, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from location_server.ingest.packet import COUNT_MAX as PACKET_COUNT_MAX
 from location_server.models import Anchor, ConfigSnapshot
-from location_server.units import COORD_MM_MAX, format_hex_id, meters_to_mm, mm_to_meters
+from location_server.units import (
+    COORD_MM_MAX,
+    TAG_ID_MAX,
+    TAG_ID_MIN,
+    format_hex_id,
+    meters_to_mm,
+    mm_to_meters,
+)
 
-# 1 パケットに詰めるサイクル数の上限。タグ側のリングバッファと UDP ペイロードに収まる範囲に抑える
-BATCH_CYCLES_MAX = 64
+# 1 パケットに詰めるサイクル数の上限。パケット形式の count (設計文書 6.2) の上限と一致させる
+BATCH_CYCLES_MAX = PACKET_COUNT_MAX
 UDP_PORT_MAX = 65535
+BOOT_ID_MAX = 0xFFFFFFFF
+FW_VERSION_MAX_LEN = 64
 
 Meters = Annotated[float, Field(ge=-COORD_MM_MAX / 1000, le=COORD_MM_MAX / 1000)]
 
@@ -58,6 +68,21 @@ class TelemetryPut(BaseModel):
         if self.port != 0 and self.host == "":
             raise ValueError("port が 0 でない場合は host が必要です")
         return self
+
+
+class HelloIn(BaseModel):
+    """`POST /api/v1/hello` の本文 (設計文書 5.2)。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    tag_id: int = Field(ge=TAG_ID_MIN, le=TAG_ID_MAX)
+    boot_id: int = Field(ge=0, le=BOOT_ID_MAX)
+    fw_version: Annotated[str, Field(max_length=FW_VERSION_MAX_LEN)] | None = None
+    config_rev: int | None = Field(default=None, ge=1)
+
+
+class HelloOut(BaseModel):
+    session_id: int
 
 
 class TelemetryOut(BaseModel):
