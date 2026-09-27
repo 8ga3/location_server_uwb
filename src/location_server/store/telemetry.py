@@ -4,6 +4,10 @@
 セッション行は `POST /api/v1/hello` か、UDP パケットを最初に受けた時点のどちらか早いほうで作る。
 後から届いたほうは既存の行へ足りない情報を書き足すだけで、`started_at` は動かさない。
 
+セッション行の作成と更新には `INSERT ... ON CONFLICT DO UPDATE` を使わず、`UPDATE` を先に試して
+該当が無いときだけ `INSERT` する。`session.id` は `AUTOINCREMENT` なので、UPSERT が既存行の更新に
+落ちた場合も番号が 1 つ消費され、パケットを受けるたびに ID が飛んでしまうためである。
+
 受信したパケットはまとめて 1 トランザクションで書く (設計文書 6.3)。同じ `(session_id, seq)` を
 もう一度受けた場合は先に書いた行を残し、後から届いたものは捨てる。UDP の重複配送や、
 タグ側の再送ではない偶然の重複で行が書き換わらないようにするためである。
@@ -67,16 +71,24 @@ class TelemetryStore:
         with self._lock, Transaction(self._conn):
             row = self._conn.execute(
                 """
-                INSERT INTO session (tag_id, boot_id, config_rev, fw_version, started_at, last_seen_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT (tag_id, boot_id) DO UPDATE SET
-                    config_rev = excluded.config_rev,
-                    fw_version = excluded.fw_version,
-                    last_seen_at = max(session.last_seen_at, excluded.last_seen_at)
+                UPDATE session SET
+                    config_rev = ?,
+                    fw_version = ?,
+                    last_seen_at = max(last_seen_at, ?)
+                WHERE tag_id = ? AND boot_id = ?
                 RETURNING id
                 """,
-                (tag_id, boot_id, config_rev, fw_version, now, now),
+                (config_rev, fw_version, now, tag_id, boot_id),
             ).fetchone()
+            if row is None:
+                row = self._conn.execute(
+                    """
+                    INSERT INTO session (tag_id, boot_id, config_rev, fw_version, started_at, last_seen_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    RETURNING id
+                    """,
+                    (tag_id, boot_id, config_rev, fw_version, now, now),
+                ).fetchone()
         session_id: int = row[0]
         return session_id
 
@@ -88,13 +100,19 @@ class TelemetryStore:
         """
         rows = 0
         attempted = 0
+        # セッション行は束の中でセッションごとに 1 回だけ触る。最初と最後の受信時刻を先に集めておく
+        seen: dict[tuple[int, int], tuple[str, str]] = {}
+        for item in received:
+            key = (item.packet.tag_id, item.packet.boot_id)
+            first, last = seen.get(key, (item.recv_at, item.recv_at))
+            seen[key] = (min(first, item.recv_at), max(last, item.recv_at))
         sessions: dict[tuple[int, int], int] = {}
         with self._lock, Transaction(self._conn):
+            for key, (first, last) in seen.items():
+                sessions[key] = self._touch_session(key, first, last)
             for item in received:
                 packet = item.packet
-                key = (packet.tag_id, packet.boot_id)
-                session_id = self._touch_session(key, item.recv_at)
-                sessions[key] = session_id
+                session_id = sessions[(packet.tag_id, packet.boot_id)]
                 for cycle in packet.cycles:
                     attempted += 1 + len(cycle.ranges)
                     rows += self._insert_cycle(session_id, cycle, item.recv_at)
@@ -104,7 +122,7 @@ class TelemetryStore:
 
     # ------------------------------------------------------------- 内部処理
 
-    def _touch_session(self, key: tuple[int, int], recv_at: str) -> int:
+    def _touch_session(self, key: tuple[int, int], first_seen: str, last_seen: str) -> int:
         """セッションが無ければ作り、あれば `last_seen_at` を進めて ID を返す。
 
         受信の順序は保証されないので、`last_seen_at` は大きいほうを残す。
@@ -112,14 +130,21 @@ class TelemetryStore:
         tag_id, boot_id = key
         row = self._conn.execute(
             """
-            INSERT INTO session (tag_id, boot_id, started_at, last_seen_at)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT (tag_id, boot_id) DO UPDATE SET
-                last_seen_at = max(session.last_seen_at, excluded.last_seen_at)
+            UPDATE session SET last_seen_at = max(last_seen_at, ?)
+            WHERE tag_id = ? AND boot_id = ?
             RETURNING id
             """,
-            (tag_id, boot_id, recv_at, recv_at),
+            (last_seen, tag_id, boot_id),
         ).fetchone()
+        if row is None:
+            row = self._conn.execute(
+                """
+                INSERT INTO session (tag_id, boot_id, started_at, last_seen_at)
+                VALUES (?, ?, ?, ?)
+                RETURNING id
+                """,
+                (tag_id, boot_id, first_seen, last_seen),
+            ).fetchone()
         session_id: int = row[0]
         return session_id
 
