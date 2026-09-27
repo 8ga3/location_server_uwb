@@ -312,6 +312,8 @@ RX タイムスタンプがないため**このままでは TDoA を実装でき
 `qm33120w_sdk/` は内部ヘッダ扱いなので、`build_flags` に `-I` を追加して直接叩くか、
 ラッパー側に `rxTimestamp` / `txTimestamp` / `clockOffset` を返すメソッドを追加するかの二択。
 SPI 初期化とドライバインスタンス管理がラッパー側にあるため、**後者のほうが安全**。
+ライブラリはすでにフォーク (`8ga3/M5Stamp-UWB`) に切り替えているので、ラッパーへの追加はフォーク側に入れる
+([multi-anchor-positioning-design.md](multi-anchor-positioning-design.md) の「参考: M5Stamp-UWB のフォーク」)。
 
 ---
 

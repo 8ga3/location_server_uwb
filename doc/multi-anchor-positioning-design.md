@@ -1,7 +1,8 @@
 # マルチアンカー UWB 測位システム 設計メモ
 
 M5Stamp-UWB (QM33120) を用いた DS-TWR 測距を、単一ペアからマルチアンカー測位へ拡張するための設計検討。
-対象は Atom S3 / Atom S3 Lite / Atom Lite + M5Stamp-UWB。ライブラリは `m5stack/M5Stamp-UWB`。
+対象は Atom S3 / Atom S3 Lite / Atom Lite + M5Stamp-UWB。ライブラリは `m5stack/M5Stamp-UWB` を、
+受信待ちを IRQ 割り込みにしたフォークで使う (末尾の「参考: M5Stamp-UWB のフォーク」)。
 
 - 作成日: 2026-09-21
 - 想定用途: ローバー型ラジコンの自己位置推定
@@ -272,6 +273,13 @@ uus (UWB microsecond) ≈ 1.0256µs。
 遮蔽は必ず発生するため、これは「もし」ではなく「いつ」の問題である。
 `hostTimeoutMs` は 1 測距の想定時間 + マージン (15〜20ms 程度) まで下げる。`rxTimeoutUus` も同様に見直す。
 
+#### `finalTxDelayUus` — 下限はホストの処理時間で決まる
+
+Final は Response の受信時刻から `finalTxDelayUus` 後に遅延送信する。受信完了を検知してから送信を予約する
+までに約 900 µs かかり、予約は送信時刻の約 200 µs 前までに済ませないと `TX_START_FAILED` になる。
+現状の 1800 uus で残る余裕は約 700 µs。これ以上下げるには、先に SPI 転送の短縮が必要になる
+(末尾の「参考: M5Stamp-UWB のフォーク」)。
+
 #### シリアルログ
 
 115200bps = 約 87µs/byte。現状の `DS_RESP_STAT` 行は 100 文字を超えており、**1 行で 8.7ms** を消費する。
@@ -413,6 +421,10 @@ DS-TWR のフレーム送信タイミング自体は QM33120 チップ内部で�
 ### フェーズ 3: レート最適化
 
 - [ ] Atom Lite の SPI 速度を再検証 (8MHz → 引き上げ可否)。結果次第で AtomS3 Lite への統一を判断
+- [x] 受信待ちを IRQ にしたフォークへ切り替え、`finalTxDelayUus` 1800 で `TX_START_FAILED` が出ないことを確認
+  (AtomS3)
+- [ ] Atom Lite (IRQ = G21) で IRQ 待ちを確認
+- [ ] SPI をまとめ転送にし、受信から Final の予約までの約 900 µs を短縮
 - [ ] `resultRepeatCount` を 1 に落として信頼性を確認
 - [ ] `hostTimeoutMs` / `rxTimeoutUus` を短縮
 - [ ] `monitor_speed` を 921600 へ引き上げ、ログを間引く
@@ -464,3 +476,62 @@ DS-TWR のフレーム送信タイミング自体は QM33120 チップ内部で�
   同一機体で initiator / responder を動的に切り替え可能
 - `M5Stamp_UWBDSResponderResult.requester` には Poll 送信元アドレスが入る。
   Poll 未受信時は 0 のままで、非ゼロなら Poll/Response は成立して Final が失われたことを意味する
+- SYS_STATUS のポーリングは、読み出しの間に `delay(1)` を挟む。受信の検知が次の FreeRTOS tick まで遅れる
+  (次節)
+- 遅延送信の成否は、`dwt_starttx()` が開始コマンドの直後に SYS_STATUS の HPDWARN を読んで判定する。
+  ライブラリは HPDWARN をクリアしないが、次の交信には残らない (失敗直後の 1018 回すべてで確認)
+
+---
+
+## 参考: M5Stamp-UWB のフォーク
+
+ライブラリは上流の `m5stack/M5Stamp-UWB` ではなく、フォーク
+[8ga3/M5Stamp-UWB](https://github.com/8ga3/M5Stamp-UWB) の `irq-wait` ブランチを、コミットで固定して使う
+([platformio.ini](../platformio.ini) の `lib_deps`)。2026-09-27 に切り替えた。
+
+### 経緯
+
+アンカー 1〜4 台のどの構成でも、タグの測距が `TX_START_FAILED` で約 17% 失敗していた。
+失敗していたのは Final の遅延送信 (`dwt_starttx(DWT_START_TX_DELAYED)`) である。
+
+- Final は、Response の受信時刻から `finalTxDelayUus` (1800 uus) 後に送信するよう予約する
+- 上流は受信完了を `delay(1)` を挟んだポーリングで待つため、受信の検知が次の FreeRTOS tick まで遅れる
+- 検知から予約までの SPI 転送に約 900 µs かかり、予約は送信時刻の約 200 µs 前までに済ませる必要がある。
+  これに tick 待ちの遅れ (最大 1 ms) が加わると間に合わない
+- 遅れの大きさは、交信と tick の位相で決まる。タグは `millis()` の区切りで測距を始めるので、位相は
+  `millis()` と tick の位相差、つまり起動にかかる時間で決まる。同じバイナリなら再起動しても変わらない。
+  そのため、測距と関係のない変更でも失敗率が 0% から 100% の間で振れた
+
+### 検証
+
+測距の開始を 0〜900 µs の範囲で 100 µs ずつずらし、各段階で 200 回ずつ試行した
+(AtomS3 のタグ、アンカー 4 台、`finalTxDelayUus` = 1800)。余裕時間は、遅延送信を予約した時点で
+送信時刻まで残っていた時間である。
+
+| 待ち方 | 余裕時間 | 失敗 |
+| --- | --- | --- |
+| `delay(1)` (上流) | -237〜944 µs。開始のずれに対して周期 1 ms で変わる | 段階により 0〜100% |
+| IRQ 割り込み (フォーク) | 705〜947 µs。開始のずれによらずほぼ一定 | 2400 回中 0 回 |
+
+`delay(1)` で失敗した 1018 回の余裕時間は最大 202 µs で、約 200 µs が成否の境目になる。
+プリアンブルと SFD の送信時間 (約 136 µs) に、予約後の SPI 転送の時間を足した値と合う。
+
+### フォークの変更点
+
+- `M5STAMP_UWB_WAIT_MODE` で待ち方を選ぶ (0 = `delay(1)`、1 = busy-poll、2 = IRQ。既定は 2)。
+  2 は RXFCG・RX タイムアウト・RX エラーだけを IRQ ピンへ出し、ISR からのタスク通知で起きる。
+  TXFRS を含めないのは、Poll の送信完了から Response の処理まで立ったままになり、RXFCG の立ち上がりを
+  取りこぼすためである。通知の待ちは 1 tick でタイムアウトするので、取りこぼしても上流と同じ遅れで済む
+- DS-TWR の結果に `txMarginUs` (上記の余裕時間) を加えた。タグでは Final、アンカーでは Response の値になる。
+  `M5STAMP_UWB_MEASURE_MARGIN=0` を指定すると、計測のための SYS_TIME の読み出しを外せる
+
+ファームウェアは、余裕時間の最小値を `DS_RANGE_STAT` / `DS_RESP_STAT` の `min_margin_us` に、失敗時の値を
+`DS_RANGE_FAIL` の `margin_us` に出力する。起動時の `UWB_TIMING` で `finalTxDelayUus` と待ち方を確認できる
+([src/common/uwb_link.cpp](../src/common/uwb_link.cpp))。
+
+### 未確認の事項と今後
+
+- Atom Lite (IRQ = G21) での IRQ 待ちは実機で確認していない
+- 約 900 µs の処理時間の大半は SPI 転送である。ラッパーは 1 バイトごとに `transfer()` を呼び、転送ごとに
+  `beginTransaction` と CS の `digitalWrite` を行っている。まとめ転送にすれば縮み、`finalTxDelayUus` を下げられる
+- 上流への PR は検討していない
