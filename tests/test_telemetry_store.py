@@ -155,3 +155,33 @@ def test_failed_transaction_rolls_back(conn: sqlite3.Connection, telemetry: Tele
     assert _count(conn, "session") == 1
     assert _count(conn, "position_fix") == 4
     assert not conn.in_transaction
+
+
+def test_session_ids_stay_consecutive(conn: sqlite3.Connection, telemetry: TelemetryStore) -> None:
+    # AUTOINCREMENT の表では、既存行の更新に落ちた UPSERT も番号を消費する。
+    # パケットや hello を何度受けても、セッション ID は作った順の連番になる
+    first = telemetry.write_packets([_received(make_packet(boot_id=1, seq=0))]).sessions[(1, 1)]
+    for seq in range(4, 40, 4):
+        telemetry.write_packets([_received(make_packet(boot_id=1, seq=seq))])
+    telemetry.hello(
+        tag_id=1, boot_id=1, fw_version="0.1.0-dev", config_rev=1, now="2026-09-27T00:00:09+00:00"
+    )
+    second = telemetry.hello(
+        tag_id=1, boot_id=2, fw_version="0.1.0-dev", config_rev=1, now="2026-09-27T00:00:10+00:00"
+    )
+    third = telemetry.write_packets([_received(make_packet(boot_id=3))]).sessions[(1, 3)]
+    assert (first, second, third) == (1, 2, 3)
+
+
+def test_session_times_within_one_batch(conn: sqlite3.Connection, telemetry: TelemetryStore) -> None:
+    # 1 つの束に同じセッションのパケットが順不同で入っていても、最初と最後の受信時刻を使う
+    telemetry.write_packets(
+        [
+            _received(make_packet(seq=4), "2026-09-27T00:00:02+00:00"),
+            _received(make_packet(seq=0), "2026-09-27T00:00:01+00:00"),
+            _received(make_packet(seq=8), "2026-09-27T00:00:03+00:00"),
+        ]
+    )
+    session = conn.execute("SELECT started_at, last_seen_at FROM session").fetchone()
+    assert session["started_at"] == "2026-09-27T00:00:01+00:00"
+    assert session["last_seen_at"] == "2026-09-27T00:00:03+00:00"
