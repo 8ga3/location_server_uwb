@@ -44,6 +44,14 @@ M5Stamp-UWB (QM33120) を用いた DS-TWR 測距を、単一ペアからマル�
 (`.pio/libdeps/*/M5Stamp_UWB/src/M5Stamp_UWB.cpp` の該当箇所)。ブロードキャスト受信には対応していない。
 したがって**アンカーごとにユニークな `responderAddress` が必須**である。
 
+ただし、ここでいう「破棄」は受信を続けることではない。Poll を待っている間に自機宛てでないフレーム
+(他アンカー宛ての Poll や、タグと他アンカーの間の Response / Final) を受けると、`respondDSRange()` は
+そのフレームを捨てたうえで `RangeFrameMismatch` を返して終わる。複数アンカー構成では毎周期起きることなので、
+呼び出し側はこれを失敗として扱わず、無通信 (NO POLL) と同じく次の `respondDSRange()` へ進む。
+Final を待っている間の不一致は本当の異常なので、こちらは失敗として扱う。
+両者は `txMarginUs` で見分ける。この値は Response の送信を予約した時点で入るため、未設定なら Poll 待ちでの
+不一致である (実装は [main_anchor.cpp](../src/main_anchor.cpp) の `runResponder()`)。
+
 また Poll フレームの宛先はタグ側が指定するため、**タグは各アンカーのアドレスを事前に知っている必要がある**。
 このため「MAC アドレス下位 16bit を自動採番」のような方式は単体では成立しない (タグが知り得ない)。
 
@@ -160,7 +168,8 @@ DS-TWR は真の距離を返すため、時刻バイアスの未知数が不要�
 
 1. マスター 1 台 (アンカー 0 で固定してよい) がブロードキャストで `ROUND=i` を告知する
 2. `anchorId == i` の機体が initiator となり、`responderAddress` を書き換えながら j = 0..N-1 (j≠i) を順に `requestDSRange()`
-3. **それ以外の全機体は `respondDSRange()` を回しっぱなしにする。** 自分宛でないフレームは dst 不一致で自動的に破棄されるため、調停は不要
+3. **それ以外の全機体は `respondDSRange()` を回しっぱなしにする。** 自分宛でないフレームは dst 不一致で破棄されるため、調停は不要。
+   このとき返る `RangeFrameMismatch` は失敗として扱わない (2.1 節)
 4. ラウンド完了後 `DONE` をブロードキャストし、マスターが `ROUND=i+1` へ進める
 
 両方向 (i→j と j→i) を測定して平均すると、アンテナ遅延の非対称性が均される。
@@ -469,7 +478,8 @@ DS-TWR のフレーム送信タイミング自体は QM33120 チップ内部で�
 
 `m5stack/M5Stamp-UWB` について、本検討にあたり確認した事項。
 
-- `respondDSRange()` は `dst != responderAddress` のフレームを破棄する。ブロードキャスト受信は非対応
+- `respondDSRange()` は `dst != responderAddress` のフレームを破棄する。ブロードキャスト受信は非対応。
+  Poll 待ちで破棄した場合も受信は続けず、`RangeFrameMismatch` を返す。このとき `txMarginUs` は未設定のまま
 - `receiveFrame()` はアドレスフィルタを行わない。`src` / `dst` は `M5Stamp_UWBRxResult` として返る
 - `M5Stamp_UWBFrameConfig.dst` のデフォルトは `0xFFFF` (ブロードキャスト)
 - `requestDSRange()` / `respondDSRange()` は config を引数で受け取り、内部に役割状態を持たない。
