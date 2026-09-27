@@ -151,3 +151,15 @@ def test_encode_rejects_non_consecutive_seq() -> None:
     )
     with pytest.raises(ValueError, match="seq"):
         encode_packet(broken)
+
+
+@pytest.mark.parametrize("flags", [0x02, 0x80, 0xFF])
+def test_rejects_unknown_flags(flags: int) -> None:
+    body = CYCLE.pack(0, 0, 0, 0, 0, 0, 0) + RANGE.pack(0x0100, 0, 0, 0)
+    assert _reason(_header(flags=flags) + body) is DropReason.BAD_RESERVED
+
+
+def test_rejects_nonzero_reserved() -> None:
+    body = CYCLE.pack(0, 0, 0, 0, 0, 0, 0) + RANGE.pack(0x0100, 0, 0, 0)
+    header = HEADER.pack(MAGIC, 1, 0, 1, 0, 0, 0, 1, 1, 0x0001)
+    assert _reason(header + body) is DropReason.BAD_RESERVED

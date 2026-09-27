@@ -35,7 +35,9 @@ from location_server.ingest.packet import (
 )
 from location_server.settings import DEFAULT_UDP_PORT
 
-RECV_BUFFER = 2048
+# UDP データグラムの最大長。形式上有効な最大のパケット (count=16, anchor_n=255) は 32,920 バイトあり、
+# それより小さいバッファでは recvfrom() が末尾を切り捨て、有効なパケットを length_mismatch と誤表示する
+RECV_BUFFER = 65535
 
 
 def format_cycle(packet: TelemetryPacket, cycle: CycleRecord) -> str:

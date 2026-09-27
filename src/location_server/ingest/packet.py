@@ -31,6 +31,7 @@ COUNT_MAX = 16
 ANCHOR_N_MIN = 1
 
 FLAG_LAST = 0x01  # このパケットが最後 (セッション終了)
+FLAGS_KNOWN = FLAG_LAST  # version 1 で意味を持つビット。ほかは予約で 0
 FIX_FLAG_OK = 0x01  # 測位成功
 FIX_FLAG_3D = 0x02  # 3D 解
 
@@ -45,6 +46,7 @@ class DropReason(StrEnum):
     TOO_SHORT = "too_short"
     BAD_MAGIC = "bad_magic"
     BAD_VERSION = "bad_version"
+    BAD_RESERVED = "bad_reserved"
     BAD_TAG_ID = "bad_tag_id"
     BAD_COUNT = "bad_count"
     BAD_ANCHOR_N = "bad_anchor_n"
@@ -130,13 +132,16 @@ def decode_packet(data: bytes) -> TelemetryPacket:
     if len(data) < HEADER.size:
         raise PacketDecodeError(DropReason.TOO_SHORT, f"{len(data)} バイトしかありません")
 
-    magic, version, flags, tag_id, boot_id, seq, t_tag_ms, count, anchor_n, _reserved = HEADER.unpack_from(
+    magic, version, flags, tag_id, boot_id, seq, t_tag_ms, count, anchor_n, reserved = HEADER.unpack_from(
         data, 0
     )
     if magic != MAGIC:
         raise PacketDecodeError(DropReason.BAD_MAGIC, f"magic=0x{magic:08X}")
     if version != VERSION:
         raise PacketDecodeError(DropReason.BAD_VERSION, f"version={version}")
+    # 予約ビットと予約欄は version 1 では 0 と決めている。意味を足すときは version を上げる
+    if flags & ~FLAGS_KNOWN or reserved != 0:
+        raise PacketDecodeError(DropReason.BAD_RESERVED, f"flags=0x{flags:02X} reserved=0x{reserved:04X}")
     if not TAG_ID_MIN <= tag_id <= TAG_ID_MAX:
         raise PacketDecodeError(DropReason.BAD_TAG_ID, f"tag_id={tag_id}")
     if not COUNT_MIN <= count <= COUNT_MAX:

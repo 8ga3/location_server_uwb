@@ -28,7 +28,8 @@ class IngestService:
         self.writer = TelemetryWriter(store)
         self._stats_interval_s = stats_interval_s
         self._transport: asyncio.DatagramTransport | None = None
-        self._tasks: list[asyncio.Task[None]] = []
+        self._writer_task: asyncio.Task[None] | None = None
+        self._stats_task: asyncio.Task[None] | None = None
 
     @property
     def local_port(self) -> int | None:
@@ -43,24 +44,31 @@ class IngestService:
         protocol = TelemetryProtocol(self.writer.submit, self.tracker, self.receive_stats)
         transport, _ = await loop.create_datagram_endpoint(lambda: protocol, local_addr=(host, port))
         self._transport = transport
-        self._tasks = [
-            asyncio.create_task(self.writer.run(), name="telemetry-writer"),
-            asyncio.create_task(self._log_stats_periodically(), name="telemetry-stats"),
-        ]
+        self._writer_task = asyncio.create_task(self.writer.run(), name="telemetry-writer")
+        self._stats_task = asyncio.create_task(self._log_stats_periodically(), name="telemetry-stats")
         logger.info("テレメトリの UDP 受信を開始しました: %s:%d", host, self.local_port)
 
     async def stop(self) -> None:
-        """受信を止め、キューに残っているぶんを書き切ってから終わる。"""
+        """受信を止め、キューに残っているぶんを書き切ってから終わる。
+
+        書き込みタスクは cancel せずに終了を求め、実行中の書き込みが終わるまで待つ。
+        呼び出し側 (アプリの lifespan) はこのあとで SQLite の接続を閉じるので、
+        ここで待たないと書き込みの途中で接続が閉じられる。
+        """
         if self._transport is not None:
             self._transport.close()
             self._transport = None
-        for task in self._tasks:
-            task.cancel()
-        for task in self._tasks:
+        if self._stats_task is not None:
+            self._stats_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
-                await task
-        self._tasks = []
-        await self.writer.flush()
+                await self._stats_task
+            self._stats_task = None
+        if self._writer_task is not None:
+            self.writer.request_stop()
+            await self._writer_task
+            self._writer_task = None
+        else:
+            await self.writer.flush()
         self.log_stats()
 
     def log_stats(self) -> None:

@@ -185,3 +185,33 @@ def test_session_times_within_one_batch(conn: sqlite3.Connection, telemetry: Tel
     session = conn.execute("SELECT started_at, last_seen_at FROM session").fetchone()
     assert session["started_at"] == "2026-09-27T00:00:01+00:00"
     assert session["last_seen_at"] == "2026-09-27T00:00:03+00:00"
+
+
+def test_duplicate_cycle_does_not_mix_ranges(conn: sqlite3.Connection, telemetry: TelemetryStore) -> None:
+    # 同じ seq で別のアンカーを含むパケットが後から届いても、先のサイクルへ測距行を足さない
+    telemetry.write_packets([_received(make_packet(count=1, anchors=(0x0100, 0x0101)))])
+    result = telemetry.write_packets([_received(make_packet(count=1, anchors=(0x0102, 0x0103)))])
+    assert result.rows == 0
+    assert result.duplicate_rows == 3
+    anchors = [row[0] for row in conn.execute("SELECT anchor_id FROM range_sample ORDER BY anchor_id")]
+    assert anchors == [0x0100, 0x0101]
+
+
+def test_hello_keeps_values_omitted_in_resend(conn: sqlite3.Connection, telemetry: TelemetryStore) -> None:
+    telemetry.hello(
+        tag_id=1, boot_id=1, fw_version="0.1.0-dev", config_rev=7, now="2026-09-27T00:00:00+00:00"
+    )
+    telemetry.hello(tag_id=1, boot_id=1, fw_version=None, config_rev=None, now="2026-09-27T00:00:01+00:00")
+    session = conn.execute("SELECT fw_version, config_rev FROM session").fetchone()
+    assert (session["fw_version"], session["config_rev"]) == ("0.1.0-dev", 7)
+
+
+def test_started_at_moves_back_to_first_udp(conn: sqlite3.Connection, telemetry: TelemetryStore) -> None:
+    # UDP を 00:00:01 に受けてキューへ積み、書き込む前の 00:00:02 に hello が行を作った場合
+    telemetry.hello(
+        tag_id=1, boot_id=0xAAAAAAAA, fw_version="0.1.0-dev", config_rev=7, now="2026-09-27T00:00:02+00:00"
+    )
+    telemetry.write_packets([_received(make_packet(), "2026-09-27T00:00:01+00:00")])
+    session = conn.execute("SELECT started_at, last_seen_at FROM session").fetchone()
+    assert session["started_at"] == "2026-09-27T00:00:01+00:00"
+    assert session["last_seen_at"] == "2026-09-27T00:00:02+00:00"
