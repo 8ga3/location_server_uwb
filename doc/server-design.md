@@ -625,7 +625,7 @@ NULL で保存するので、この段階でも `position_fix` の行からサ�
 
 UWB 測距ループを Core 1 に固定する (`xTaskCreatePinnedToCore`)。ESP32-S3 / ESP32-PICO ともデュアルコアで、
 Wi-Fi と TCP/IP のタスクは既定で Core 0 に載る。測距の待機ポーリングが Wi-Fi に押しのけられる経路を、
-これで構造的に断てる。Atom Lite (classic ESP32) でも同じ構成が使える。
+これで構造的に断てる。Atom Lite / Atom Matrix (classic ESP32) のタグでも同じ構成で動作することを確認した。
 
 実装では測距ループを新しいタスクに移さず、Arduino の `loop()` のまま回す。`loop()` を回す `loopTask` は
 Arduino コアが `xTaskCreatePinnedToCore` で `ARDUINO_RUNNING_CORE` に固定して作っており、

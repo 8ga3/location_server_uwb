@@ -1,7 +1,7 @@
 # 下り TDoA (DL-TDoA) 方式 設計メモ
 
 タグを多数収容しながら 20 Hz の自己位置推定を成立させるための、DS-TWR に代わる方式の検討。
-対象ハードは Atom S3 / Atom S3 Lite / Atom Lite + M5Stamp-UWB (QM33120W)。
+対象ハードは Atom S3 / Atom S3 Lite / Atom Lite / Atom Matrix + M5Stamp-UWB (QM33120W)。
 
 - 作成日: 2026-09-21
 - 想定用途: ローバー型ラジコンの自己位置推定 (複数機)
@@ -359,9 +359,9 @@ SPI 初期化とドライバインスタンス管理がラッパー側にある�
 
 - **Initiator の冗長化**: Initiator が落ちるとシステム全体が止まる。ローテーション方式の検討
 - **スロット 500 µs の実機検証**: ESP32 の turnaround が本当に 300 µs に収まるか要実測。
-  Atom Lite は `spi_fast_hz = 8 MHz` に落としているため不利
-  ([src/common/uwb_link.cpp](../src/common/uwb_link.cpp) 参照)
-  - 8MHzに落と差なくても動作したのを確認した。ハンダ不良が原因で動作が不安定だった可能性あり。
+  SPI は classic ESP32 (Atom Lite / Atom Matrix) も ESP32-S3 と同じ 20 MHz で動かしている。
+  当初 8 MHz に落としたきっかけの不安定な動作は、はんだ付けの不良が原因だった可能性がある
+  ([src/common/hw_pins.h](../src/common/hw_pins.h) の `UWB_SPI_FAST_HZ` 参照)
 - **CFO 補正後の残差の実測**: 0.01 ppm という想定値の妥当性確認
 - **マルチパス環境での外れ値率**: 屋内の実測データが必要
 - **DS-TWR とのハイブリッド**: 1 局だけ TWR で絶対距離を取り、TDoA の解の曖昧性除去と
