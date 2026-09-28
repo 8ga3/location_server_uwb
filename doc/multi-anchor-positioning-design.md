@@ -103,7 +103,7 @@ panId             = 0xDECA              (全機共通)
 
 シリアル入力を待つ間は UWB を初期化しない。ID が決まる前に電波を出さないためである。
 
-実装は両プロジェクトの `src/device_id.h` (同一内容のコピー)。ボタンのピンは LED と同じ理由で
+実装はタグとアンカーで共通の [src/common/device_id.h](../src/common/device_id.h)。ボタンのピンは LED と同じ理由で
 `getBoard()` ではなくビルドターゲットから決める (AtomS3 系 G41 / Atom Lite と Atom Matrix G39)。
 
 ---
@@ -307,8 +307,8 @@ Final は Response の受信時刻から `finalTxDelayUus` 後に遅延送信す
 ([src/common/hw_pins.h](../src/common/hw_pins.h) の `UWB_SPI_FAST_HZ`)。GPIO マトリクス経由の全二重転送の上限が
 20MHz で、80MHz の APB クロックを割り切れる値でもある。8MHz に落としたきっかけの不安定な動作は、
 はんだ付けの不良が原因だった可能性がある。起動時に 20MHz で ID レジスタを読み戻し、壊れていれば
-ライブラリ既定の 16MHz で初期化し直す。Atom Matrix の起動ログで 20MHz の読み戻しが通ることを確認し、
-Atom Lite と Atom Matrix がタグとアンカーのどちらの役割でも動作することを確認した。
+ライブラリ既定の 16MHz で初期化し直す。Atom Lite と Atom Matrix の起動ログで 20MHz の読み戻しが通ることと、
+両機がタグとアンカーのどちらの役割でも動作することを確認した。
 
 ### 5.4 同時性誤差
 
@@ -416,7 +416,7 @@ DS-TWR のフレーム送信タイミング自体は QM33120 チップ内部で�
 
 ### フェーズ 1: アドレス動的設定
 
-- [x] NVS (Preferences) による ID 保存を実装 (タグ・アンカー共通の `src/device_id.h`)
+- [x] NVS (Preferences) による ID 保存を実装 (タグ・アンカー共通の `src/common/device_id.h`)
 - [x] 起動時のシリアル入力による ID 設定を実装 (10 進、範囲外は再要求)
 - [x] 入力待ちの表示を実装 (LCD 表示 / LED マゼンタ)
 - [x] 起動時ボタン押下で設定モードへ入る導線を実装
