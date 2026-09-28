@@ -1,7 +1,7 @@
 # マルチアンカー UWB 測位システム 設計メモ
 
 M5Stamp-UWB (QM33120) を用いた DS-TWR 測距を、単一ペアからマルチアンカー測位へ拡張するための設計検討。
-対象は Atom S3 / Atom S3 Lite / Atom Lite + M5Stamp-UWB。ライブラリは `m5stack/M5Stamp-UWB` を、
+対象は Atom S3 / Atom S3 Lite / Atom Lite / Atom Matrix + M5Stamp-UWB。ライブラリは `m5stack/M5Stamp-UWB` を、
 受信待ちを IRQ 割り込みにしたフォークで使う (末尾の「参考: M5Stamp-UWB のフォーク」)。
 
 - 作成日: 2026-09-21
@@ -96,14 +96,15 @@ panId             = 0xDECA              (全機共通)
 - 起動時、ID が未設定 (または役割の範囲外) ならシリアル入力を待つ。**10 進数**で入力し、
   範囲外や数字以外は `ID_INPUT,result=ERR` を返して再要求する
 - 入力待ちの表示: 画面のある AtomS3 は LCD に `SET ID` と入力中の値、画面のない Lite 系は
-  **LED マゼンタ点灯**。マゼンタは通常動作の RED / YELLOW / GREEN と重ならないので一目で判別できる
+  **LED マゼンタ点灯**。マゼンタは通常動作の RED / YELLOW / GREEN と重ならないので一目で判別できる。
+  Atom Matrix は 5x5 の LED をすべてマゼンタで点ける (通常動作中は状態の色で自機の ID を表示する)
 - 電源投入またはリセット直後に本体ボタンが押されていれば、設定済みでも設定モードへ入る (現場での振り直し)
 - 起動時ログに `DEVICE_ID,role=...,id=...,source=nvs|serial` を必ず出力する
 
 シリアル入力を待つ間は UWB を初期化しない。ID が決まる前に電波を出さないためである。
 
 実装は両プロジェクトの `src/device_id.h` (同一内容のコピー)。ボタンのピンは LED と同じ理由で
-`getBoard()` ではなくビルドターゲットから決める (AtomS3 系 G41 / Atom Lite G39)。
+`getBoard()` ではなくビルドターゲットから決める (AtomS3 系 G41 / Atom Lite と Atom Matrix G39)。
 
 ---
 
@@ -299,11 +300,15 @@ Final は Response の受信時刻から `finalTxDelayUus` 後に遅延送信す
 
 ### 5.3 SPI 速度
 
-Atom Lite (classic ESP32) は `config.spi_fast_hz = 8000000` に落としている
+当初、Atom Lite (classic ESP32) は `config.spi_fast_hz = 8000000` に落としていた
 (全信号が GPIO マトリクス経由となるため)。AtomS3 系の 16MHz に対してレジスタアクセスが 2 倍遅い。
 
-**→ Atom Lite の SPI 速度は再検証する。結果次第で全機を AtomS3 Lite に揃えるか判断する。**
-高レート側では AtomS3 系が有利。
+再検証の結果、現在は classic ESP32 と ESP32-S3 の両方を 20MHz で動かしている
+([src/common/hw_pins.h](../src/common/hw_pins.h) の `UWB_SPI_FAST_HZ`)。GPIO マトリクス経由の全二重転送の上限が
+20MHz で、80MHz の APB クロックを割り切れる値でもある。8MHz に落としたきっかけの不安定な動作は、
+はんだ付けの不良が原因だった可能性がある。起動時に 20MHz で ID レジスタを読み戻し、壊れていれば
+ライブラリ既定の 16MHz で初期化し直す。Atom Matrix の起動ログで 20MHz の読み戻しが通ることを確認し、
+Atom Lite と Atom Matrix がタグとアンカーのどちらの役割でも動作することを確認した。
 
 ### 5.4 同時性誤差
 
@@ -429,10 +434,10 @@ DS-TWR のフレーム送信タイミング自体は QM33120 チップ内部で�
 
 ### フェーズ 3: レート最適化
 
-- [ ] Atom Lite の SPI 速度を再検証 (8MHz → 引き上げ可否)。結果次第で AtomS3 Lite への統一を判断
+- [x] Atom Lite の SPI 速度を再検証 (8MHz → 20MHz へ引き上げ。5.3)
 - [x] 受信待ちを IRQ にしたフォークへ切り替え、`finalTxDelayUus` 1800 で `TX_START_FAILED` が出ないことを確認
   (AtomS3)
-- [ ] Atom Lite (IRQ = G21) で IRQ 待ちを確認
+- [x] Atom Lite / Atom Matrix (IRQ = G21) で IRQ 待ちを確認
 - [ ] SPI をまとめ転送にし、受信から Final の予約までの約 900 µs を短縮
 - [ ] `resultRepeatCount` を 1 に落として信頼性を確認
 - [ ] `hostTimeoutMs` / `rxTimeoutUus` を短縮
@@ -465,7 +470,6 @@ DS-TWR のフレーム送信タイミング自体は QM33120 チップ内部で�
 
 ## 9. 未決事項
 
-- Atom Lite の SPI 速度上限 (フェーズ 3 で再検証)
 - タグ Atom と FC 間のインターフェース (UART / I2C / CAN)
 - 遮蔽で可視アンカーが 3 台未満になった場合の挙動 (前回位置の保持 / FC 側へのフォールバック通知)
 
@@ -541,7 +545,6 @@ DS-TWR のフレーム送信タイミング自体は QM33120 チップ内部で�
 
 ### 未確認の事項と今後
 
-- Atom Lite (IRQ = G21) での IRQ 待ちは実機で確認していない
 - 約 900 µs の処理時間の大半は SPI 転送である。ラッパーは 1 バイトごとに `transfer()` を呼び、転送ごとに
   `beginTransaction` と CS の `digitalWrite` を行っている。まとめ転送にすれば縮み、`finalTxDelayUus` を下げられる
 - 上流への PR は検討していない
