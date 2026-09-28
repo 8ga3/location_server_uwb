@@ -307,8 +307,11 @@ Final は Response の受信時刻から `finalTxDelayUus` 後に遅延送信す
 ([src/common/hw_pins.h](../src/common/hw_pins.h) の `UWB_SPI_FAST_HZ`)。GPIO マトリクス経由の全二重転送の上限が
 20MHz で、80MHz の APB クロックを割り切れる値でもある。8MHz に落としたきっかけの不安定な動作は、
 はんだ付けの不良が原因だった可能性がある。起動時に 20MHz で ID レジスタを読み戻し、壊れていれば
-ライブラリ既定の 16MHz で初期化し直す。Atom Lite と Atom Matrix の起動ログで 20MHz の読み戻しが通ることと、
-両機がタグとアンカーのどちらの役割でも動作することを確認した。
+ライブラリ既定の 16MHz で初期化し直す。Atom Lite と Atom Matrix の起動ログで 20MHz の読み戻しが通ることを
+確認した。役割ごとの実機確認は次のとおり。
+
+- Atom Lite: 以前からアンカーとして運用しており、タグとしても動作することを確認した
+- Atom Matrix: タグとアンカーの両方で動作することを確認した
 
 ### 5.4 同時性誤差
 
