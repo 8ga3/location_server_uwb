@@ -4,7 +4,9 @@
 `snapshot` / `append` と参照 API の `track` / `ranges` は、同じ列名・同じ単位の列指向 JSON を返す。
 受信直後のパケット (`CycleRecord`) からも DB の行からも、ここにある組み立て器を通して作る。
 
-- `t` はタグの `millis()` (整数ミリ秒)、`seq` はサイクル通番
+- `t` はタグの `millis()` (整数ミリ秒)、`seq` はサイクル通番。どちらもパケットでは 32 ビットで折り返すが、
+  セッションの中で単調に増えるよう折り返しを展開した値を返す (折り返した回数に 2^32 を掛けた値を足す)。
+  折り返す前は受信した値そのままなので、通常の走行試験では生の値と一致する
 - `dt` は直前のサイクル (`seq` が 1 つ前) からの時刻差 [ms]。欠番をまたぐ場合と直前が無い場合は `null`。
   間引いた再生データでも本来の周期が見えるよう、間引く前に計算して載せる
 - 長さ (`x` / `y` / `z` / `resid` / `d`) はメートル。API の JSON でのみメートルへ直す方針に従う
@@ -66,10 +68,11 @@ class FixColumns:
         self.used.append(used)
         self.resid.append(_meters_or_none(resid_mm))
 
-    def add_cycle(self, cycle: CycleRecord, dt_ms: int | None) -> None:
+    def add_cycle(self, cycle: CycleRecord, *, t_ms: int, seq: int, dt_ms: int | None) -> None:
+        """受信したサイクルを足す。`t_ms` / `seq` には折り返しを展開した値を渡す。"""
         self.add(
-            t_ms=cycle.t_tag_ms,
-            seq=cycle.seq,
+            t_ms=t_ms,
+            seq=seq,
             dt_ms=dt_ms,
             ok=cycle.fix_ok,
             x_mm=cycle.x_mm,
@@ -145,12 +148,13 @@ class RangeTable:
             self.anchors[anchor_id] = columns
         columns.add(t_ms=t_ms, seq=seq, status=status, distance_mm=distance_mm, elapsed_ms=elapsed_ms)
 
-    def add_cycle(self, cycle: CycleRecord) -> None:
+    def add_cycle(self, cycle: CycleRecord, *, t_ms: int, seq: int) -> None:
+        """受信したサイクルの測距を足す。`t_ms` / `seq` には折り返しを展開した値を渡す。"""
         for record in cycle.ranges:
             self.add(
                 anchor_id=record.anchor_id,
-                t_ms=cycle.t_tag_ms,
-                seq=cycle.seq,
+                t_ms=t_ms,
+                seq=seq,
                 status=record.status,
                 distance_mm=record.distance_mm,
                 elapsed_ms=record.elapsed_ms,

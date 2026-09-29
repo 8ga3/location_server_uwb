@@ -4,7 +4,13 @@
 構成配信・保存系と共有しているので、同じロックの下で読む。
 
 大量のデータは `max_points` に従って等間隔に間引く。1 時間ぶんを素で返すとブラウザが固まるためで、
-間引きは行番号の剰余で行い、何行おきに取ったか (`stride`) を結果に添える。
+間引きは行番号の剰余で行い、何行おきに取ったか (`stride`) を結果に添える。末尾の行は必ず含める。
+
+`seq` と `t_tag_ms` はパケットでは 32 ビットで折り返すので、並べる前にセッションごとに展開する。
+`seq` はセッションの最小値と最大値の差が 2^31 を超えていれば折り返したとみなし、2^31 未満の値に 2^32 を足す
+(1 セッションが 2^31 サイクル未満であることを前提とする。30 Hz で 2 年以上)。`t_tag_ms` は展開した `seq` の
+順に並べ、直前より 2^31 以上小さくなった回数だけ 2^32 を足す。返す `t` / `seq` と、`from_ms` / `to_ms` で
+指定する範囲は、この展開した値である。
 """
 
 from __future__ import annotations
@@ -107,11 +113,54 @@ class SessionSummary:
     anchors: tuple[AnchorStats, ...]
 
 
+MAX_POINTS_MIN = 2
+
+
 def stride_for(total: int, max_points: int) -> int:
-    """`total` 行を `max_points` 行以下へ間引くときの間隔。"""
-    if max_points <= 0:
-        raise ValueError(f"max_points は 1 以上です: {max_points}")
-    return max(1, math.ceil(total / max_points))
+    """`total` 行を、末尾の行を含めて `max_points` 行以下へ間引くときの間隔。
+
+    先頭から `stride` 行おきに取り、最後に末尾の行を足す。SQL 側 (`_STRIDE`) と同じ式である。
+    """
+    if max_points < MAX_POINTS_MIN:
+        raise ValueError(f"max_points は {MAX_POINTS_MIN} 以上です: {max_points}")
+    if total <= max_points:
+        return 1
+    return math.ceil((total - 1) / (max_points - 1))
+
+
+_U31 = 1 << 31
+_U32 = 1 << 32
+
+
+def _normalized(table: str, scope: str, partition: str) -> str:
+    """`seq_n` / `t_n` (折り返しを展開した seq と t_tag_ms) を足した CTE を作る。
+
+    `scope` は `table` に掛ける WHERE 句、`partition` は展開を独立に行う単位 (セッション、アンカー) である。
+    続けて書く CTE からは `n` という名前で参照する。
+    """
+    return f"""
+    n0 AS (
+        SELECT *, max(seq) OVER p - min(seq) OVER p > {_U31 - 1} AS seq_wrapped
+        FROM {table} WHERE {scope}
+        WINDOW p AS (PARTITION BY {partition})
+    ),
+    n1 AS (
+        SELECT *, seq + CASE WHEN seq_wrapped AND seq < {_U31} THEN {_U32} ELSE 0 END AS seq_n FROM n0
+    ),
+    n2 AS (
+        SELECT *, CASE WHEN t_tag_ms < lag(t_tag_ms) OVER w - {_U31} THEN 1 ELSE 0 END AS t_wrap
+        FROM n1 WINDOW w AS (PARTITION BY {partition} ORDER BY seq_n)
+    ),
+    n AS (
+        SELECT *, t_tag_ms + {_U32} * sum(t_wrap) OVER (
+            PARTITION BY {partition} ORDER BY seq_n ROWS UNBOUNDED PRECEDING
+        ) AS t_n
+        FROM n2
+    )"""
+
+
+# 間引きの間隔。stride_for() と同じ式で、:max_points は 2 以上
+_STRIDE = "CASE WHEN total <= :max_points THEN 1 ELSE (total + :max_points - 3) / (:max_points - 1) END"
 
 
 _SESSION_COLUMNS = """
@@ -120,14 +169,15 @@ _SESSION_COLUMNS = """
     f.first_seq, f.last_seq, f.first_t, f.last_t
 """
 
+# セッションごとの受信状況。seq と t は折り返しを展開した値で数える
 _FIX_AGGREGATE = """
     SELECT session_id, count(*) AS cycles, sum(ok) AS ok_cycles,
-           min(seq) AS first_seq, max(seq) AS last_seq, min(t_tag_ms) AS first_t, max(t_tag_ms) AS last_t
-    FROM position_fix
+           min(seq_n) AS first_seq, max(seq_n) AS last_seq, min(t_n) AS first_t, max(t_n) AS last_t
+    FROM n GROUP BY session_id
 """
 
-# 時刻範囲の条件。`from_ms` / `to_ms` はタグの millis() で、None なら端を切らない
-_TIME_RANGE = "(:from_ms IS NULL OR t_tag_ms >= :from_ms) AND (:to_ms IS NULL OR t_tag_ms <= :to_ms)"
+# 時刻範囲の条件。`from_ms` / `to_ms` は折り返しを展開したタグの millis() で、None なら端を切らない
+_TIME_RANGE = "(:from_ms IS NULL OR t_n >= :from_ms) AND (:to_ms IS NULL OR t_n <= :to_ms)"
 
 
 def _session_info(row: sqlite3.Row) -> SessionInfo:
@@ -161,12 +211,14 @@ class QueryStore:
         with self._lock:
             rows = self._conn.execute(
                 f"""
+                WITH picked AS (SELECT * FROM session ORDER BY id DESC LIMIT :limit),
+                {_normalized("position_fix", "session_id IN (SELECT id FROM picked)", "session_id")},
+                f AS ({_FIX_AGGREGATE})
                 SELECT {_SESSION_COLUMNS}
-                FROM (SELECT * FROM session ORDER BY id DESC LIMIT ?) AS s
-                LEFT JOIN ({_FIX_AGGREGATE} GROUP BY session_id) AS f ON f.session_id = s.id
+                FROM picked AS s LEFT JOIN f ON f.session_id = s.id
                 ORDER BY s.id DESC
                 """,
-                (limit,),
+                {"limit": limit},
             ).fetchall()
         return [_session_info(row) for row in rows]
 
@@ -182,33 +234,26 @@ class QueryStore:
         with self._lock:
             rows = self._conn.execute(
                 f"""
-                WITH base AS (
+                WITH {_normalized("position_fix", "session_id = :session_id", "session_id")},
+                d AS (
                     -- 周期は間引く前に、セッション全体で隣り合う seq どうしから求める
-                    SELECT t_tag_ms, seq, ok, x_mm, y_mm, z_mm, used_count, residual_mm,
-                           CASE WHEN seq - lag(seq) OVER w = 1 THEN t_tag_ms - lag(t_tag_ms) OVER w END AS dt
-                    FROM position_fix
-                    WHERE session_id = :session_id
-                    WINDOW w AS (ORDER BY seq)
+                    SELECT *, CASE WHEN seq_n - lag(seq_n) OVER w = 1 THEN t_n - lag(t_n) OVER w END AS dt
+                    FROM n WINDOW w AS (ORDER BY seq_n)
                 ),
                 r AS (
-                    SELECT *,
-                           row_number() OVER (ORDER BY t_tag_ms, seq) - 1 AS rn,
-                           count(*) OVER () AS total
-                    FROM base
-                    WHERE {_TIME_RANGE}
-                )
-                SELECT *, (total + :max_points - 1) / :max_points AS stride
-                FROM r
-                WHERE rn % ((total + :max_points - 1) / :max_points) = 0
-                ORDER BY rn
+                    SELECT *, row_number() OVER (ORDER BY seq_n) - 1 AS rn, count(*) OVER () AS total
+                    FROM d WHERE {_TIME_RANGE}
+                ),
+                k AS (SELECT *, {_STRIDE} AS stride FROM r)
+                SELECT * FROM k WHERE rn % stride = 0 OR rn = total - 1 ORDER BY rn
                 """,
                 params,
             ).fetchall()
         fix = FixColumns()
         for row in rows:
             fix.add(
-                t_ms=row["t_tag_ms"],
-                seq=row["seq"],
+                t_ms=row["t_n"],
+                seq=row["seq_n"],
                 dt_ms=row["dt"],
                 ok=bool(row["ok"]),
                 x_mm=row["x_mm"],
@@ -244,19 +289,20 @@ class QueryStore:
         with self._lock:
             rows = self._conn.execute(
                 f"""
-                WITH r AS (
-                    SELECT anchor_id, t_tag_ms, seq, status, distance_mm, elapsed_ms,
-                           row_number() OVER (PARTITION BY anchor_id ORDER BY t_tag_ms, seq) - 1 AS rn,
+                WITH {
+                    _normalized(
+                        "range_sample",
+                        "session_id = :session_id AND (:anchor_id IS NULL OR anchor_id = :anchor_id)",
+                        "anchor_id",
+                    )
+                },
+                r AS (
+                    SELECT *, row_number() OVER (PARTITION BY anchor_id ORDER BY seq_n) - 1 AS rn,
                            count(*) OVER (PARTITION BY anchor_id) AS total
-                    FROM range_sample
-                    WHERE session_id = :session_id
-                      AND (:anchor_id IS NULL OR anchor_id = :anchor_id)
-                      AND {_TIME_RANGE}
-                )
-                SELECT *, (total + :max_points - 1) / :max_points AS stride
-                FROM r
-                WHERE rn % ((total + :max_points - 1) / :max_points) = 0
-                ORDER BY anchor_id, rn
+                    FROM n WHERE {_TIME_RANGE}
+                ),
+                k AS (SELECT *, {_STRIDE} AS stride FROM r)
+                SELECT * FROM k WHERE rn % stride = 0 OR rn = total - 1 ORDER BY anchor_id, rn
                 """,
                 params,
             ).fetchall()
@@ -269,8 +315,8 @@ class QueryStore:
                 result[aid] = entry
             entry.data.add(
                 anchor_id=aid,
-                t_ms=row["t_tag_ms"],
-                seq=row["seq"],
+                t_ms=row["t_n"],
+                seq=row["seq_n"],
                 status=row["status"],
                 distance_mm=row["distance_mm"],
                 elapsed_ms=row["elapsed_ms"],
@@ -293,15 +339,15 @@ class QueryStore:
             ).fetchone()
             # 周期は隣り合う seq どうしの時刻差で見る。欠番をまたぐ差は周期ではないので含めない
             period_row = self._conn.execute(
-                """
-                WITH d AS (
-                    SELECT t_tag_ms - lag(t_tag_ms) OVER w AS dt, seq - lag(seq) OVER w AS dseq
-                    FROM position_fix WHERE session_id = ?
-                    WINDOW w AS (ORDER BY seq)
+                f"""
+                WITH {_normalized("position_fix", "session_id = :id", "session_id")},
+                d AS (
+                    SELECT t_n - lag(t_n) OVER w AS dt, seq_n - lag(seq_n) OVER w AS dseq
+                    FROM n WINDOW w AS (ORDER BY seq_n)
                 )
                 SELECT avg(dt) AS mean_dt, max(dt) AS max_dt FROM d WHERE dseq = 1
                 """,
-                (session_id,),
+                {"id": session_id},
             ).fetchone()
             range_rows = self._conn.execute(
                 """
@@ -339,9 +385,10 @@ class QueryStore:
     def _get_session(self, session_id: int) -> SessionInfo | None:
         row = self._conn.execute(
             f"""
+            WITH {_normalized("position_fix", "session_id = :id", "session_id")},
+            f AS ({_FIX_AGGREGATE})
             SELECT {_SESSION_COLUMNS}
-            FROM session AS s
-            LEFT JOIN ({_FIX_AGGREGATE} WHERE session_id = :id) AS f ON f.session_id = s.id
+            FROM session AS s LEFT JOIN f ON f.session_id = s.id
             WHERE s.id = :id
             """,
             {"id": session_id},
