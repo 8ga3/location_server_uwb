@@ -563,9 +563,11 @@ IP フラグメントは起きない。`count = 16` でも 792 バイトに収�
 構成配信の `batch_cycles` (5.1) の上限は `count` と同じ 16 とする。`PUT /api/v1/config/telemetry` は
 17 以上を受け付けない。タグ側も念のため 16 で打ち切る。
 
-測位 (自己位置推定) がまだタグに載っていない段階では、`fix_flags = 0`・`used_count = 0` として
-測距レコードだけを意味のある値で送る。サーバーは測位に失敗したサイクルの座標と `method` を
-NULL で保存するので、この段階でも `position_fix` の行からサイクルの周期と欠番を追える。
+タグは 1 サイクルごとに 2D 三辺測量を行い、測位欄を埋めて送る
+([multi-anchor-positioning-design.md](multi-anchor-positioning-design.md) の 3.6)。解けなかったサイクルは
+`fix_flags = 0` とし、座標欄は 0 のまま、`used_count` には解に渡した測距の数を入れる。サーバーは測位に
+失敗したサイクルの座標と `method` を NULL で保存するので、そのサイクルも `position_fix` の行から周期と欠番を
+追える。測距レコードには、解から外した測距 (有り得ない負の値) も生の値のまま入る。
 
 ### 6.3 サーバー側の受信処理
 
@@ -714,6 +716,11 @@ AtomS3R のタグ 1 台、アンカー 4 台、`RANGE_CYCLE_MS = 200` (5 Hz、1 
 約 78 パケットを送り、送信失敗と捨てた周期は 0、`sendto()` の最大は 0.93 ms だった。1 スロット 8 ms から
 測距の 3 ms を引いた余裕は約 5 ms で、`sendto()` はその中に収まっている
 ([multi-anchor-positioning-design.md](multi-anchor-positioning-design.md) の 5.2)。
+
+タグに 2D 三辺測量を載せたあと (multi-anchor-positioning-design.md の 3.6)、同じ 30 Hz で約 2 分測った。
+10 秒ごとの 11 区間すべてで周期は 32 ms、スロットの遅れは 0 で、送信失敗と捨てた周期は 0 だった。
+測位の計算は 1 サイクルあたり最大 116 µs で、`sendto()` の最大は 1.33 ms だった。どちらを足しても
+1 スロットの余裕 (約 5 ms) に収まる。
 
 ---
 
