@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from location_server.ingest.packet import COUNT_MAX as PACKET_COUNT_MAX
 from location_server.models import Anchor, ConfigSnapshot
+from location_server.store.query import SessionInfo, SessionSummary
 from location_server.units import (
     COORD_MM_MAX,
     TAG_ID_MAX,
@@ -166,4 +167,182 @@ def to_config_out(snapshot: ConfigSnapshot) -> ConfigOut:
             port=meta.telemetry_port,
             batch_cycles=meta.batch_cycles,
         ),
+    )
+
+
+# ---------------------------------------------------------------- 参照 API (設計文書 5.5)
+#
+# 列指向のデータはライブ配信 (WebSocket の snapshot / append) と同じ列名・単位で返す。
+# 組み立ては `location_server.columns` に寄せてあり、ここでは応答の形を宣言するだけにする。
+
+TRACK_MAX_POINTS_DEFAULT = 2000
+TRACK_MAX_POINTS_LIMIT = 20_000
+SESSION_LIST_LIMIT_DEFAULT = 100
+SESSION_LIST_LIMIT_MAX = 1000
+
+
+class FixColumnsOut(BaseModel):
+    """測位結果の列。`t` はタグの millis()、長さはメートル。測位に失敗したサイクルの座標は null。
+
+    `dt` は直前のサイクルからの時刻差 [ms] で、欠番をまたぐ場合は null。間引く前に求める。
+    """
+
+    t: list[int]
+    seq: list[int]
+    dt: list[int | None]
+    x: list[float | None]
+    y: list[float | None]
+    z: list[float | None]
+    ok: list[bool]
+    used: list[int | None]
+    resid: list[float | None]
+
+
+class RangeColumnsOut(BaseModel):
+    """アンカー 1 台ぶんの測距の列。`d` はメートルで、失敗 (`st != 0`) は null。`el` は elapsed_ms。"""
+
+    t: list[int]
+    seq: list[int]
+    d: list[float | None]
+    st: list[int]
+    el: list[int | None]
+
+
+class DecimationOut(BaseModel):
+    """間引きの情報。`total` は間引く前の件数、`stride` は何件おきに取ったか。"""
+
+    total: int
+    stride: int
+
+
+class TrackOut(BaseModel):
+    session_id: int
+    decimation: DecimationOut
+    fix: FixColumnsOut
+
+
+class RangesOut(BaseModel):
+    session_id: int
+    decimation: dict[str, DecimationOut]
+    ranges: dict[str, RangeColumnsOut]
+
+
+class SessionOut(BaseModel):
+    """セッション 1 件。`missing_cycles` / `loss_rate` は `seq` の欠番 (UDP の欠測) から数える。"""
+
+    id: int
+    tag_id: int
+    boot_id: int
+    config_rev: int | None
+    fw_version: str | None
+    started_at: str
+    last_seen_at: str
+    note: str | None
+    cycles: int
+    fix_ok_cycles: int
+    missing_cycles: int
+    fix_rate: float | None
+    loss_rate: float | None
+    first_t_ms: int | None
+    last_t_ms: int | None
+
+
+class SessionListOut(BaseModel):
+    sessions: list[SessionOut]
+
+
+class LiveAnchorOut(BaseModel):
+    """可視化ページへ渡すアンカー。XY 平面へ描くので呼び名も添える。"""
+
+    id: str
+    label: str | None
+    x: float
+    y: float
+    z: float
+
+
+class AnchorSummaryOut(BaseModel):
+    """アンカー 1 台ぶんの測距の集計。`status_counts` のキーは status の 10 進表記。"""
+
+    id: str
+    samples: int
+    ok_samples: int
+    success_rate: float | None
+    elapsed_mean_ms: float | None
+    elapsed_max_ms: int | None
+    distance_mean: float | None
+    status_counts: dict[str, int]
+
+
+class SummaryOut(BaseModel):
+    """`GET /api/v1/sessions/{id}/summary` の応答。
+
+    `anchors` はそのセッションが使った構成リビジョン (`anchors_rev`) の座標表。
+    セッションの構成リビジョンがわからない場合は現在の構成を返し、`anchors_rev` でそれと示す。
+    """
+
+    session: SessionOut
+    residual_rms: float | None
+    period_mean_ms: float | None
+    period_max_ms: int | None
+    used_min: int | None
+    used_max: int | None
+    ranges: list[AnchorSummaryOut]
+    anchors_rev: int
+    anchors: list[LiveAnchorOut]
+
+
+def to_live_anchor_out(anchor: Anchor) -> LiveAnchorOut:
+    return LiveAnchorOut(
+        id=format_hex_id(anchor.id),
+        label=anchor.label,
+        x=mm_to_meters(anchor.x_mm),
+        y=mm_to_meters(anchor.y_mm),
+        z=mm_to_meters(anchor.z_mm),
+    )
+
+
+def to_session_out(info: SessionInfo) -> SessionOut:
+    return SessionOut(
+        id=info.id,
+        tag_id=info.tag_id,
+        boot_id=info.boot_id,
+        config_rev=info.config_rev,
+        fw_version=info.fw_version,
+        started_at=info.started_at,
+        last_seen_at=info.last_seen_at,
+        note=info.note,
+        cycles=info.cycles,
+        fix_ok_cycles=info.fix_ok_cycles,
+        missing_cycles=info.missing_cycles,
+        fix_rate=info.fix_rate,
+        loss_rate=info.loss_rate,
+        first_t_ms=info.first_t_ms,
+        last_t_ms=info.last_t_ms,
+    )
+
+
+def to_summary_out(summary: SessionSummary, anchors: ConfigSnapshot) -> SummaryOut:
+    return SummaryOut(
+        session=to_session_out(summary.session),
+        residual_rms=None if summary.residual_rms_mm is None else summary.residual_rms_mm / 1000,
+        period_mean_ms=summary.period_mean_ms,
+        period_max_ms=summary.period_max_ms,
+        used_min=summary.used_min,
+        used_max=summary.used_max,
+        ranges=[
+            AnchorSummaryOut(
+                id=format_hex_id(stats.anchor_id),
+                samples=stats.samples,
+                ok_samples=stats.ok_samples,
+                success_rate=stats.success_rate,
+                elapsed_mean_ms=stats.elapsed_mean,
+                elapsed_max_ms=stats.elapsed_max,
+                distance_mean=None if stats.distance_mean_mm is None else stats.distance_mean_mm / 1000,
+                status_counts={str(code): n for code, n in sorted(stats.status_counts.items())},
+            )
+            for stats in summary.anchors
+        ],
+        anchors_rev=anchors.meta.rev,
+        anchors=[to_live_anchor_out(anchor) for anchor in anchors.enabled_anchors],
     )

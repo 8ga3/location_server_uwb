@@ -22,13 +22,13 @@ UWB 測位のデバッグ・精度評価に使うサーバーである。アン�
 
 ## 実装状況
 
-フェーズ B (テレメトリ収集) までを実装している。
+フェーズ C (ライブ配信と可視化ページ) までを実装している。
 
 | フェーズ | 内容 | 状態 |
 | --- | --- | --- |
 | A | SQLite スキーマ、構成配信 API、アンカー管理 API、座標入力 CLI | 実装済み |
 | B | UDP によるテレメトリ収集、セッション開始通知、UDP ダンパ | 実装済み。実機で測定済み (AP 切断後に再接続する瞬間の周期のみ未確認) |
-| C | ライブ配信と可視化ページ | 未着手 |
+| C | ライブ配信 (WebSocket)、参照 API、可視化ページ | 実装済み。実機での表示の確認と遅延の測定は未実施 |
 | D | self-survey 連携 | 未着手 |
 
 フェーズ A の「タグ側の Wi-Fi 取得 + NVS キャッシュ」と、フェーズ B の「タグ側のリングバッファと UDP 送信」
@@ -80,6 +80,12 @@ uv run python -m location_server --version
 | `POST` | `/api/v1/hello` | タグのセッション開始通知。共有トークンは要求しない |
 | `GET` | `/api/v1/anchors` | アンカー一覧。無効化されているものも含む |
 | `PUT` | `/api/v1/anchors/{id}` | アンカー 1 台の登録・更新 |
+| `GET` | `/api/v1/sessions` | セッション一覧 (新しい順。測位成功率・欠測率つき) |
+| `GET` | `/api/v1/sessions/{id}/track` | 推定位置の軌跡 (列指向、`max_points` で間引き) |
+| `GET` | `/api/v1/sessions/{id}/ranges` | アンカーごとの測距 (列指向、`anchor_id` で絞り込み) |
+| `GET` | `/api/v1/sessions/{id}/summary` | セッションの集計と、当時のアンカー座標 |
+| `WS` | `/api/v1/ws/live` | ライブ配信 (`subscribe` / `unsubscribe`) |
+| `GET` | `/` | 可視化ページ |
 | `GET` | `/healthz` | 死活確認 |
 
 座標は API の JSON でのみメートル表記とし、通信と DB 内部では整数ミリメートルで保持する。
@@ -132,6 +138,22 @@ uv run python tools/dump_udp.py listen --port 47100
 uv run python tools/dump_udp.py send --host 127.0.0.1 --port 47100 --cycles 40
 ```
 
+## 可視化ページ
+
+サーバーを起動してブラウザで `http://<サーバーの IP>:8000/` を開く。ライブラリ (uPlot) は同梱しているので、
+外部ネットワークに出られない環境でも動く。
+
+- 「表示」で「ライブ」を選ぶと、指定したタグ ID の直近 30 秒を WebSocket で受けて描き続ける。
+  状態ランプは直近 1 秒の測距成功率 (緑 90% 以上 / 黄 50% 以上 / 赤それ未満) を表す。
+  「一時停止」は描画だけを止め、受信は続ける。再開すると最新の状態へ追いつく
+- 過去のセッションを選ぶと再生になる。スライダーか時系列グラフのクリックで時刻を選び、グラフを横に
+  ドラッグすると区間を拡大する。間引かれている場合は拡大した区間を細かく取り直す。
+  ダブルクリックか「全体表示」で元に戻る
+- XY 平面には、アンカー位置、軌跡 (古い点ほど青く、新しい点ほど赤い)、選択時刻の測距円 (アンカーとタグの
+  高さの差を除いた水平距離)、測位失敗の × を描く。アンカーから大きく外れた点は既定では表示範囲に含めない。
+  「軌跡に合わせて表示範囲を広げる」で含める
+- URL の `#tag=1` / `#session=12` で開く画面を指定できる
+
 ## 開発
 
 ```sh
@@ -151,3 +173,6 @@ README 冒頭の記載と同じ値にする。運用方針は [AGENTS.md](AGENTS
 ## License
 
 MIT License。詳細は [LICENSE](LICENSE) を参照。
+
+可視化ページに同梱している [uPlot](https://github.com/leeoniya/uPlot) (v1.6.32) も MIT License である
+([src/location_server/static/vendor/uplot/LICENSE](src/location_server/static/vendor/uplot/LICENSE))。
