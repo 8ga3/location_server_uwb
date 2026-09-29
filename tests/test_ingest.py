@@ -300,3 +300,14 @@ def test_pending_rows_are_flushed_on_shutdown(db_path: Path) -> None:
 
 def test_udp_disabled_by_default(client: TestClient) -> None:
     assert client.app.state.ingest is None  # type: ignore[attr-defined]
+
+
+def test_tracker_limits_number_of_sessions() -> None:
+    """boot_id を変え続けられても、追跡するセッションは上限に収まる。最も長く受信していないものから忘れる。"""
+    tracker = SeqTracker(max_sessions=3)
+    for boot in range(1, 4):
+        tracker.observe(make_packet(boot_id=boot, seq=0))
+    tracker.observe(make_packet(boot_id=1, seq=4))  # boot 1 を最近受けたものにする
+    tracker.observe(make_packet(boot_id=4, seq=0))
+    assert set(tracker.sessions) == {(1, 1), (1, 3), (1, 4)}
+    assert tracker.evicted_sessions == 1

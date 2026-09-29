@@ -41,6 +41,12 @@ RETENTION_MS = 60_000
 # 時間幅とは別に持つ件数の上限。タグの millis() が飛んだ場合でもメモリを食い続けないようにする。
 # 30 Hz (32 ms 周期) の 60 秒ぶん (約 1900 サイクル) に対して 2 倍の余裕を持たせた
 MAX_BUFFER_CYCLES = 4096
+# 測距レコードの数でも上限を設ける。パケット形式は anchor_n を 255 まで許すので、サイクル数だけでは
+# 1 セッションで 100 万件を超える測距を抱えうる。30 Hz・アンカー 8 台の 60 秒ぶん (約 14,400 件) の 2 倍余り
+MAX_BUFFER_RANGES = 32_768
+# 全セッションの測距レコードの合計の上限。タグ ID ごとに終了済みのセッションも残すので、
+# 未認証の UDP から多数のタグ ID を名乗られても、メモリはこの件数ぶん (数十 MB) までに収まる
+MAX_TOTAL_RANGES = 262_144
 # 差分を束ねて送る間隔 (設計文書 5.6)
 FLUSH_INTERVAL_S = 0.05
 # この時間パケットが来なければセッション終了とみなす (設計文書 8.3)
@@ -82,7 +88,8 @@ class LiveStats:
 
     - `late_cycles`: 直前に受けたものより新しくない `seq` で届いたため捨てたサイクル (順序の入れ替わり・重複)
     - `stale_cycles`: 終了済みのセッションに属するため捨てたサイクル
-    - `overflow_cycles`: リングバッファの件数上限を超えて捨てたサイクル
+    - `overflow_cycles`: リングバッファの上限 (サイクル数と測距レコード数。セッションごとと全体) を超えて
+      捨てたサイクル
     - `dropped_frames`: 購読者のキューが溢れて捨てたフレームと、新しい `error` に置き換えたフレーム
       (全購読者の合計)
     - `overflow_disconnects`: 制御フレームだけでキューのハード上限を超えたため切断した接続の数
@@ -127,6 +134,8 @@ class LiveSession:
     last_t_raw: int = 0
     last_seq_n: int = 0
     last_t_n: int = 0
+    # cycles が抱えている測距レコードの数
+    range_count: int = 0
 
     def identity(self) -> Frame:
         return {"session_id": self.session_id, "tag_id": self.tag_id, "boot_id": self.boot_id}
@@ -238,6 +247,8 @@ class LiveHub:
         *,
         retention_ms: int = RETENTION_MS,
         max_buffer_cycles: int = MAX_BUFFER_CYCLES,
+        max_buffer_ranges: int = MAX_BUFFER_RANGES,
+        max_total_ranges: int = MAX_TOTAL_RANGES,
         flush_interval_s: float = FLUSH_INTERVAL_S,
         session_timeout_s: float = SESSION_TIMEOUT_S,
         subscriber_max_frames: int = SUBSCRIBER_MAX_FRAMES,
@@ -246,6 +257,8 @@ class LiveHub:
     ) -> None:
         self._retention_ms = retention_ms
         self._max_buffer_cycles = max_buffer_cycles
+        self._max_buffer_ranges = max_buffer_ranges
+        self._max_total_ranges = max_total_ranges
         self._flush_interval_s = flush_interval_s
         self._session_timeout_s = session_timeout_s
         self._subscriber_max_frames = subscriber_max_frames
@@ -358,9 +371,11 @@ class LiveHub:
             session.last_t_n = t_n
             live_cycle = LiveCycle(cycle, t_n, seq_n, dt_ms)
             session.cycles.append(live_cycle)
+            session.range_count += len(cycle.ranges)
             session.pending.append(live_cycle)
             self.stats.published_cycles += 1
         self._trim(session)
+        self._enforce_total_limit()
         session.last_seen = now
 
         if packet.last:
@@ -494,13 +509,43 @@ class LiveHub:
 
     def _trim(self, session: LiveSession) -> None:
         cycles = session.cycles
-        while len(cycles) > self._max_buffer_cycles:
-            cycles.popleft()
+        while cycles and (
+            len(cycles) > self._max_buffer_cycles or session.range_count > self._max_buffer_ranges
+        ):
+            self._pop_oldest(session)
             self.stats.overflow_cycles += 1
         if cycles:
             latest = cycles[-1].t_ms
             while len(cycles) > 1 and latest - cycles[0].t_ms > self._retention_ms:
-                cycles.popleft()
+                self._pop_oldest(session)
+
+    def _enforce_total_limit(self) -> None:
+        """全セッションの測距レコードの合計を上限以下にする。
+
+        終了済みのセッションから、抱えている件数が多い順に古いサイクルを捨てる。
+        それでも足りなければ稼働中のセッションから同じように捨てる。
+        """
+        total = sum(session.range_count for session in self.sessions.values())
+        while total > self._max_total_ranges:
+            victim = max(
+                (session for session in self.sessions.values() if session.cycles),
+                key=lambda session: (not session.active, session.range_count),
+                default=None,
+            )
+            if victim is None:
+                break
+            total -= self._pop_oldest(victim)
+            self.stats.overflow_cycles += 1
+
+    @staticmethod
+    def _pop_oldest(session: LiveSession) -> int:
+        """最も古いサイクルを捨て、減った測距レコードの数を返す。"""
+        dropped = session.cycles.popleft()
+        session.range_count -= len(dropped.record.ranges)
+        # 未送信のサイクルまで捨てた場合は、append でも送らない (snapshot との対応を崩さない)
+        if len(session.pending) > len(session.cycles):
+            session.pending.pop(0)
+        return len(dropped.record.ranges)
 
     def _session_info_frame(self, session: LiveSession) -> Frame:
         return {"type": "session_info", **session.identity(), "config_rev": session.config_rev}
