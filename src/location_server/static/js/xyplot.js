@@ -3,11 +3,16 @@
 
 import { cssVar, trailColor } from "./colors.js";
 
-const NICE_STEPS = [0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 50, 100, 200, 500, 1000];
-
-function niceStep(span, targetLines) {
+// 目盛り幅を 1 / 2 / 5 × 10^n から選び、線の数を targetLines 前後に保つ。
+// 発散した解 (最大で約 2147 km) を表示範囲に含めても、線が数千本にならないようにする
+export function niceStep(span, targetLines) {
   const raw = span / targetLines;
-  return NICE_STEPS.find((s) => s >= raw) ?? NICE_STEPS[NICE_STEPS.length - 1];
+  if (!(raw > 0) || !Number.isFinite(raw)) return 1;
+  const magnitude = 10 ** Math.floor(Math.log10(raw));
+  for (const factor of [1, 2, 5, 10]) {
+    if (factor * magnitude >= raw) return factor * magnitude;
+  }
+  return 10 * magnitude;
 }
 
 function extend(box, x, y) {
@@ -142,7 +147,7 @@ export class XYPlot {
     ctx.fillStyle = colors.muted;
     ctx.textAlign = "left";
     ctx.textBaseline = "top";
-    const digits = step < 1 ? 1 : 0;
+    const digits = step < 1 ? Math.min(3, Math.ceil(-Math.log10(step))) : 0;
     for (let x = Math.ceil(minX / step) * step; x <= maxX; x += step) {
       const px = Math.round(frame.toX(x)) + 0.5;
       ctx.strokeStyle = Math.abs(x) < step / 2 ? colors.muted : colors.grid;

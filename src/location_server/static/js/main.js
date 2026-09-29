@@ -309,6 +309,8 @@ function startLive(tagId) {
   stopPlayback();
   state.mode = "live";
   state.replay = null;
+  // 読み込み途中の再生データが後から届いても、ライブの表示を上書きさせない
+  state.replayToken = null;
   state.live.tagId = tagId;
   state.live.endReason = null;
   state.live.lastFrameAt = null;
@@ -406,9 +408,10 @@ async function openReplay(sessionId) {
   showMessage("");
   try {
     const [summary, overview] = await Promise.all([loadSummary(sessionId), loadWindow(sessionId)]);
-    if (state.replayToken !== token) return;
-    const first = overview.track.fix.t[0] ?? 0;
-    const last = overview.track.fix.t.at(-1) ?? 0;
+    if (state.replayToken !== token || state.mode !== "replay") return;
+    // 全体の範囲は間引いていない集計値から取る。間引いたデータの両端はセッションの両端と限らない
+    const first = summary.session.first_t_ms ?? overview.track.fix.t[0] ?? 0;
+    const last = summary.session.last_t_ms ?? overview.track.fix.t.at(-1) ?? 0;
     state.replay = {
       sessionId,
       summary,
