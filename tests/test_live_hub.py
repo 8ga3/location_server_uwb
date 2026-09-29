@@ -357,3 +357,22 @@ def test_control_frame_flood_overflows_and_disconnects() -> None:
 
     with pytest.raises(SubscriberOverflowError):
         asyncio.run(wait())
+
+
+def test_stats_log_records_active_session_change(caplog: pytest.LogCaptureFixture) -> None:
+    """timeout で稼働中のセッションが 0 になっただけでも LIVE_STATS を出し直す。"""
+    hub, clock = _hub(stats_interval_s=0.01)
+    hub.publish(make_packet(seq=0))
+
+    async def scenario() -> None:
+        task = asyncio.create_task(hub._log_stats_periodically())
+        await asyncio.sleep(0.05)
+        clock.now += 5
+        hub.tick()
+        await asyncio.sleep(0.05)
+        task.cancel()
+
+    with caplog.at_level("INFO", logger="location_server.live.hub"):
+        asyncio.run(scenario())
+    lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("LIVE_STATS")]
+    assert [line.split(",")[1] for line in lines] == ["active_sessions=1", "active_sessions=0"]

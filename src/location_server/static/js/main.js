@@ -171,7 +171,13 @@ function render(now) {
   }
 
   const replay = state.replay;
-  if (!replay) return;
+  if (!replay) {
+    // 読み込み中 (または失敗)。空のデータで描き、前の表示を残さない
+    xy.render({ data, colors: state.colors, fromIndex: 0, toIndex: -1, cursorIndex: -1, ended: true, fitTrail: false });
+    charts.update(data, null, null);
+    charts.setCursor(null);
+    return;
+  }
   const cursor = data.indexNear(replay.cursorT);
   const from = lastIndexAtOrBefore(fix.t, replay.windowMin - 1) + 1;
   xy.render({
@@ -222,20 +228,23 @@ function renderLiveSummaryThrottled(now) {
   renderCursorInfo(data.fix.t.length - 1);
 }
 
+// 座標表の表示。サーバーはセッションの構成リビジョンがわからないか、この DB に無い場合に現在の構成を返すので、
+// セッションのリビジョンと実際に使った座標表のリビジョンが違えばそれとわかるように書く
+function configLabel(sessionRev, anchorsRev) {
+  if (anchorsRev === null || anchorsRev === undefined) return "--";
+  if (sessionRev === null || sessionRev === undefined) return `rev ${anchorsRev} (現在の構成)`;
+  if (sessionRev !== anchorsRev) return `rev ${anchorsRev} (現在の構成。rev ${sessionRev} が無い)`;
+  return `rev ${anchorsRev}`;
+}
+
 function renderLiveSummary() {
   const info = data.info;
   const ind = liveIndicators(data);
-  const configLabel =
-    data.anchorsRev === null
-      ? "--"
-      : info.config_rev === null
-        ? `rev ${data.anchorsRev} (現在の構成)`
-        : `rev ${data.anchorsRev}`;
   $("summary-title").textContent = `ライブ: タグ ${info.tag_id ?? state.live.tagId}`;
   renderStats($("summary"), [
     ["セッション", info.session_id === null ? "--" : `#${info.session_id}`],
     ["boot_id", hex(info.boot_id, 8)],
-    ["座標表", configLabel],
+    ["座標表", configLabel(info.config_rev, data.anchorsRev), info.config_rev !== null && info.config_rev !== data.anchorsRev],
     ["状態", info.boot_id === null ? "受信待ち" : info.active ? "受信中" : "終了", !info.active && info.boot_id !== null],
     ["測位レート (1 秒)", ind ? num(ind.fixRateHz, 1, " Hz") : "--"],
     ["サイクル (1 秒)", ind ? num(ind.cycleRateHz, 1, " Hz") : "--"],
@@ -273,6 +282,8 @@ function onFrame(frame) {
       data.setAnchors(frame.anchors, frame.anchors_rev);
       data.append(frame.fix, frame.ranges);
       state.live.lost = 0;
+      // 最終受信は測定値が届いた時刻だけで数える。snapshot の中身は過去のデータのことがある
+      state.live.lastFrameAt = null;
       state.live.endReason = frame.active || frame.boot_id === null ? null : "ended";
       break;
     case "session_start":
@@ -288,6 +299,7 @@ function onFrame(frame) {
       data.append(frame.fix, frame.ranges);
       if (data.lastT() !== null) data.trimBefore(data.lastT() - TRAIL_MS);
       state.live.lost = frame.lost ?? 0;
+      if (frame.fix.t.length > 0) state.live.lastFrameAt = performance.now();
       break;
     case "session_end":
       if (frame.boot_id === data.info.boot_id) {
@@ -301,7 +313,6 @@ function onFrame(frame) {
     default:
       return;
   }
-  state.live.lastFrameAt = performance.now();
   state.dirty = true;
 }
 
@@ -331,13 +342,12 @@ function startLive(tagId) {
 function renderReplaySummary(summary) {
   const s = summary.session;
   $("summary-title").textContent = `再生: セッション #${s.id}`;
-  const configLabel = s.config_rev === null ? `rev ${summary.anchors_rev} (現在の構成)` : `rev ${summary.anchors_rev}`;
   const decimation = state.replay?.decimation;
   renderStats($("summary"), [
     ["タグ", String(s.tag_id)],
     ["boot_id", hex(s.boot_id, 8)],
     ["FW", s.fw_version ?? "--"],
-    ["座標表", configLabel],
+    ["座標表", configLabel(s.config_rev, summary.anchors_rev), s.config_rev !== null && s.config_rev !== summary.anchors_rev],
     ["開始", s.started_at.replace("T", " ").slice(0, 19)],
     ["サイクル数", String(s.cycles)],
     ["測位成功率", pct(s.fix_rate)],
@@ -406,6 +416,14 @@ async function openReplay(sessionId) {
   const token = Symbol("replay");
   state.replayToken = token;
   showMessage("");
+  // 読み込みが終わるまで (失敗したときも)、直前のライブや別セッションの表示を選んだセッションとして見せない
+  state.replay = null;
+  data.clear();
+  data.setAnchors([], null);
+  $("summary-title").textContent = `再生: セッション #${sessionId} (読み込み中)`;
+  for (const id of ["summary", "cursor-info", "anchor-head", "anchor-body"]) $(id).replaceChildren();
+  $("slider-label").textContent = "";
+  state.dirty = true;
   try {
     const [summary, overview] = await Promise.all([loadSummary(sessionId), loadWindow(sessionId)]);
     if (state.replayToken !== token || state.mode !== "replay") return;
@@ -432,6 +450,8 @@ async function openReplay(sessionId) {
     updateSlider();
     state.dirty = true;
   } catch (error) {
+    if (state.replayToken !== token) return;
+    $("summary-title").textContent = `再生: セッション #${sessionId} (読み込み失敗)`;
     showMessage(`セッションを読めませんでした: ${error.message}`);
   }
 }
