@@ -168,8 +168,8 @@ class Subscriber:
         """フレームを積む。上限を超えたら古い append から捨てる。
 
         - `error` は未送信のものを 1 つだけ残し、新しいものに置き換える。誤った要求を連打されても溜まらない
-        - `snapshot` / `session_start` / `session_end` / `session_info` は捨てない。落とすとクライアントの状態が
-          食い違うため
+        - `snapshot` / `session_start` / `session_end` / `session_info` は捨てない。
+          落とすとクライアントの状態が食い違うため
         - それでもハード上限 (`max_frames` の 2 倍) を超えたら、キューを捨てて `overflowed` を立てる。
           送信側は接続を閉じ、ページは再接続して snapshot から取り直す。偽の UDP パケットで
           `session_start` / `session_end` を大量に起こされても、接続ごとのメモリが有限に収まる
