@@ -5,7 +5,8 @@
 タグは失敗しても走行を続けてよく、サーバー側も UDP を最初に受けた時点でセッションを作る。
 
 可視化ページが使う参照 API (設計文書 5.5) とセッション一覧もここに置く。どれも読み取りだけなので
-共有トークンは要求しない。時刻の範囲 (`from_ms` / `to_ms`) はタグの millis() で指定する。
+共有トークンは要求しない。時刻の範囲 (`from_ms` / `to_ms`) は、32 ビットの折り返しを展開したタグの
+millis() で指定する。
 """
 
 from __future__ import annotations
@@ -41,13 +42,15 @@ from location_server.api.schemas import (
     to_summary_out,
 )
 from location_server.db import utc_now_text
-from location_server.store.query import SessionInfo
+from location_server.store.query import MAX_POINTS_MIN, SessionInfo
 from location_server.units import format_hex_id
 
 router = APIRouter(prefix="/api/v1", tags=["sessions"])
 
-TagMillis = Annotated[int | None, Query(ge=0, le=0xFFFFFFFF)]
-MaxPoints = Annotated[int, Query(ge=1, le=TRACK_MAX_POINTS_LIMIT)]
+# タグの millis() は 32 ビットで折り返すが、参照 API は折り返しを展開した値で扱う (store/query.py)。
+# 上限はブラウザの Number が整数を正確に表せる範囲 (2^53) とする
+TagMillis = Annotated[int | None, Query(ge=0, le=2**53)]
+MaxPoints = Annotated[int, Query(ge=MAX_POINTS_MIN, le=TRACK_MAX_POINTS_LIMIT)]
 
 
 @router.post("/hello", response_model=HelloOut)

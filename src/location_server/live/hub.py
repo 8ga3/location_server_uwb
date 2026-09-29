@@ -49,6 +49,9 @@ HISTORY_MS_DEFAULT = 30_000
 # 購読者ごとのフレームキューの上限。50 ms ごとの append で約 1 秒ぶん。
 # ライブ表示で見たいのは最新の状態なので、これより遅れたクライアントには古いフレームを捨てて追いつかせる
 SUBSCRIBER_MAX_FRAMES = 20
+# 捨てられない制御フレームが溜まり続けた場合のハード上限 (SUBSCRIBER_MAX_FRAMES の倍数)。
+# これを超えたクライアントは切断する。ページは再接続して snapshot から取り直す
+SUBSCRIBER_HARD_LIMIT_FACTOR = 2
 STATS_LOG_INTERVAL_S = 10.0
 
 # 終了済みとして覚えておく boot_id の数 (タグごと)。再起動後に遅れて届いた旧セッションのパケットを
@@ -78,7 +81,9 @@ class LiveStats:
     - `late_cycles`: 直前に受けたものより新しくない `seq` で届いたため捨てたサイクル (順序の入れ替わり・重複)
     - `stale_cycles`: 終了済みのセッションに属するため捨てたサイクル
     - `overflow_cycles`: リングバッファの件数上限を超えて捨てたサイクル
-    - `dropped_frames`: 購読者のキューが溢れて捨てたフレーム (全購読者の合計)
+    - `dropped_frames`: 購読者のキューが溢れて捨てたフレームと、新しい `error` に置き換えたフレーム
+      (全購読者の合計)
+    - `overflow_disconnects`: 制御フレームだけでキューのハード上限を超えたため切断した接続の数
     """
 
     published_cycles: int = 0
@@ -86,22 +91,21 @@ class LiveStats:
     stale_cycles: int = 0
     overflow_cycles: int = 0
     dropped_frames: int = 0
+    overflow_disconnects: int = 0
 
 
 @dataclass(frozen=True, slots=True)
 class LiveCycle:
-    """リングバッファの 1 要素。周期 (`dt_ms`) は受信した時点で直前のサイクルから求めておく。"""
+    """リングバッファの 1 要素。
+
+    `t_ms` / `seq` は 32 ビットの折り返しを展開した値で、セッションの中で単調に増える。
+    周期 (`dt_ms`) も受信した時点で直前のサイクルから求めておく。
+    """
 
     record: CycleRecord
+    t_ms: int
+    seq: int
     dt_ms: int | None
-
-    @property
-    def seq(self) -> int:
-        return self.record.seq
-
-    @property
-    def t_tag_ms(self) -> int:
-        return self.record.t_tag_ms
 
 
 @dataclass(slots=True)
@@ -116,8 +120,11 @@ class LiveSession:
     active: bool = True
     cycles: deque[LiveCycle] = field(default_factory=deque)
     pending: list[LiveCycle] = field(default_factory=list)
+    # 直前に受け入れたサイクルの生の値と、折り返しを展開した値
     last_seq: int | None = None
-    last_t_ms: int | None = None
+    last_t_raw: int = 0
+    last_seq_n: int = 0
+    last_t_n: int = 0
 
     def identity(self) -> Frame:
         return {"session_id": self.session_id, "tag_id": self.tag_id, "boot_id": self.boot_id}
@@ -128,9 +135,13 @@ def columns_of(cycles: Iterable[LiveCycle]) -> tuple[FixColumns, RangeTable]:
     fix = FixColumns()
     ranges = RangeTable()
     for cycle in cycles:
-        fix.add_cycle(cycle.record, cycle.dt_ms)
-        ranges.add_cycle(cycle.record)
+        fix.add_cycle(cycle.record, t_ms=cycle.t_ms, seq=cycle.seq, dt_ms=cycle.dt_ms)
+        ranges.add_cycle(cycle.record, t_ms=cycle.t_ms, seq=cycle.seq)
     return fix, ranges
+
+
+class SubscriberOverflowError(Exception):
+    """捨てられないフレームだけでキューのハード上限を超えた。接続を切って取り直させる。"""
 
 
 class Subscriber:
@@ -141,6 +152,8 @@ class Subscriber:
         # 購読してから捨てたフレームの累計。append の `lost` として通知する
         self.lost = 0
         self._max_frames = max_frames
+        self._hard_limit = max_frames * SUBSCRIBER_HARD_LIMIT_FACTOR
+        self.overflowed = False
         self._frames: deque[Frame] = deque()
         self._ready = asyncio.Event()
         self._stats = stats
@@ -152,13 +165,25 @@ class Subscriber:
     def push(self, frame: Frame) -> None:
         """フレームを積む。上限を超えたら古い append から捨てる。
 
-        制御フレーム (snapshot / session_start / session_end / error) は捨てずに残す。
-        これらを落とすとクライアントの状態が食い違うためで、数が少ないので上限を大きく超えることはない。
+        - `error` は未送信のものを 1 つだけ残し、新しいものに置き換える。誤った要求を連打されても溜まらない
+        - `snapshot` / `session_start` / `session_end` は捨てない。落とすとクライアントの状態が食い違うため
+        - それでもハード上限 (`max_frames` の 2 倍) を超えたら、キューを捨てて `overflowed` を立てる。
+          送信側は接続を閉じ、ページは再接続して snapshot から取り直す。偽の UDP パケットで
+          `session_start` / `session_end` を大量に起こされても、接続ごとのメモリが有限に収まる
         """
+        if self.overflowed:
+            return
+        if frame["type"] == "error":
+            self._drop_pending_errors()
         self._frames.append(frame)
         while len(self._frames) > self._max_frames:
             if not self._drop_oldest_append():
                 break
+        if len(self._frames) > self._hard_limit:
+            self._frames.clear()
+            self.overflowed = True
+            if self._stats is not None:
+                self._stats.overflow_disconnects += 1
         self._ready.set()
 
     def reset(self, first: Frame | None) -> None:
@@ -175,11 +200,21 @@ class Subscriber:
         return self._frames.popleft()
 
     async def next(self) -> Frame:
+        """次のフレームを待つ。キューがハード上限を超えていれば `SubscriberOverflowError` を送出する。"""
         while True:
+            if self.overflowed:
+                raise SubscriberOverflowError
             frame = self.pop_nowait()
             if frame is not None:
                 return frame
             await self._ready.wait()
+
+    def _drop_pending_errors(self) -> None:
+        kept = deque(frame for frame in self._frames if frame["type"] != "error")
+        dropped = len(self._frames) - len(kept)
+        if dropped and self._stats is not None:
+            self._stats.dropped_frames += dropped
+        self._frames = kept
 
     def _drop_oldest_append(self) -> bool:
         for index, frame in enumerate(self._frames):
@@ -266,8 +301,8 @@ class LiveHub:
                 "ranges": ranges.to_json(),
             }
         sent = list(session.cycles)[: max(0, len(session.cycles) - len(session.pending))]
-        latest = sent[-1].t_tag_ms if sent else 0
-        recent = [c for c in sent if _ms_after(latest, c.t_tag_ms) <= history_ms]
+        latest = sent[-1].t_ms if sent else 0
+        recent = [c for c in sent if latest - c.t_ms <= history_ms]
         fix, ranges = columns_of(recent)
         return {
             "type": "snapshot",
@@ -306,16 +341,19 @@ class LiveHub:
                 # DB 側には保存系が別に書くので、再生では抜けずに見える
                 self.stats.late_cycles += 1
                 continue
-            dt_ms = None
-            if (
-                session.last_seq is not None
-                and session.last_t_ms is not None
-                and ((cycle.seq - session.last_seq) & _U32_MASK) == 1
-            ):
-                dt_ms = _ms_after(cycle.t_tag_ms, session.last_t_ms)
+            if session.last_seq is None:
+                seq_n, t_n, dt_ms = cycle.seq, cycle.t_tag_ms, None
+            else:
+                # 直前のサイクルからの差を足して、32 ビットの折り返しを展開する
+                step = (cycle.seq - session.last_seq) & _U32_MASK
+                seq_n = session.last_seq_n + step
+                t_n = session.last_t_n + _ms_after(cycle.t_tag_ms, session.last_t_raw)
+                dt_ms = t_n - session.last_t_n if step == 1 else None
             session.last_seq = cycle.seq
-            session.last_t_ms = cycle.t_tag_ms
-            live_cycle = LiveCycle(cycle, dt_ms)
+            session.last_t_raw = cycle.t_tag_ms
+            session.last_seq_n = seq_n
+            session.last_t_n = t_n
+            live_cycle = LiveCycle(cycle, t_n, seq_n, dt_ms)
             session.cycles.append(live_cycle)
             session.pending.append(live_cycle)
             self.stats.published_cycles += 1
@@ -381,7 +419,7 @@ class LiveHub:
         s = self.stats
         logger.info(
             "LIVE_STATS,active_sessions=%d,subscribers=%d,published_cycles=%d,late_cycles=%d,"
-            "stale_cycles=%d,overflow_cycles=%d,dropped_frames=%d",
+            "stale_cycles=%d,overflow_cycles=%d,dropped_frames=%d,overflow_disconnects=%d",
             sum(1 for session in self.sessions.values() if session.active),
             len(self._subscribers),
             s.published_cycles,
@@ -389,6 +427,7 @@ class LiveHub:
             s.stale_cycles,
             s.overflow_cycles,
             s.dropped_frames,
+            s.overflow_disconnects,
         )
 
     async def _log_stats_periodically(self) -> None:
@@ -440,8 +479,8 @@ class LiveHub:
             cycles.popleft()
             self.stats.overflow_cycles += 1
         if cycles:
-            latest = cycles[-1].t_tag_ms
-            while len(cycles) > 1 and _ms_after(latest, cycles[0].t_tag_ms) > self._retention_ms:
+            latest = cycles[-1].t_ms
+            while len(cycles) > 1 and latest - cycles[0].t_ms > self._retention_ms:
                 cycles.popleft()
 
     def _session_start_frame(self, session: LiveSession) -> Frame:

@@ -26,7 +26,7 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
 from location_server.api.deps import snapshot_for_session
 from location_server.api.schemas import to_live_anchor_out
-from location_server.live import LiveHub, Subscriber
+from location_server.live import LiveHub, Subscriber, SubscriberOverflowError
 from location_server.live.hub import HISTORY_MS_DEFAULT, HISTORY_MS_MAX
 from location_server.store import ConfigStore
 from location_server.units import TAG_ID_MAX, TAG_ID_MIN
@@ -93,9 +93,20 @@ async def _receive_ops(websocket: WebSocket, hub: LiveHub, subscriber: Subscribe
             hub.unsubscribe(subscriber)
 
 
+# 追いつけないクライアントを切るときの close code (RFC 6455 の 1013 Try Again Later)
+CLOSE_TRY_AGAIN_LATER = 1013
+
+
 async def _send_frames(websocket: WebSocket, subscriber: Subscriber, store: ConfigStore) -> None:
     while True:
-        frame = await subscriber.next()
+        try:
+            frame = await subscriber.next()
+        except SubscriberOverflowError:
+            # 捨てられない制御フレームだけでキューが溢れた。接続を閉じ、
+            # ページに再接続させて snapshot から取り直させる
+            logger.warning("ライブ配信の送信キューが上限を超えたため接続を閉じます")
+            await websocket.close(code=CLOSE_TRY_AGAIN_LATER, reason="live queue overflow")
+            return
         kind = frame["type"]
         if kind in ("snapshot", "session_start"):
             try:

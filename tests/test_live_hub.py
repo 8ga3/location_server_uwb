@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
+import pytest
+
 from location_server.ingest.packet import RangeRecord, TelemetryPacket
-from location_server.live import LiveHub, Subscriber
+from location_server.live import LiveHub, Subscriber, SubscriberOverflowError
 from location_server.live.hub import END_NEW_SESSION, END_TAG_LAST, END_TIMEOUT
 from telemetry_helpers import make_packet
 
@@ -302,3 +305,55 @@ def test_failed_fix_and_failed_range_are_null() -> None:
     assert snapshot["fix"]["x"] == [None]
     assert snapshot["fix"]["used"] == [2]
     assert snapshot["ranges"]["0x0100"] == {"t": [1000], "seq": [0], "d": [None], "st": [3], "el": [7]}
+
+
+def test_millis_and_seq_wrap_are_unrolled() -> None:
+    hub, _ = _hub()
+    sub = hub.connect()
+    hub.subscribe(sub, 1)
+    hub.publish(make_packet(seq=0xFFFFFFFE, t_tag_ms=0xFFFFFFFF - 150, count=4, period_ms=100))
+    hub.tick()
+    append = _drain(sub)[-1]
+    start = 0xFFFFFFFF - 150
+    assert append["fix"]["seq"] == [0xFFFFFFFE, 0xFFFFFFFF, 2**32, 2**32 + 1]
+    assert append["fix"]["t"] == [start, start + 100, start + 200, start + 300]
+    assert append["fix"]["dt"] == [None, 100, 100, 100]
+    assert append["ranges"]["0x0100"]["t"] == append["fix"]["t"]
+    # 折り返した後のパケットも遅延扱いにならず、時刻が続く
+    hub.publish(make_packet(seq=2, t_tag_ms=start + 400 - 2**32, count=1))
+    hub.tick()
+    append = _drain(sub)[-1]
+    assert (append["fix"]["seq"], append["fix"]["t"], append["fix"]["dt"]) == (
+        [2**32 + 2],
+        [start + 400],
+        [100],
+    )
+
+
+def test_invalid_requests_do_not_accumulate_errors() -> None:
+    hub, _ = _hub(subscriber_max_frames=3)
+    sub = hub.connect()
+    for i in range(100):
+        sub.push({"type": "error", "detail": str(i)})
+    frames = _drain(sub)
+    # 未送信の error は最新の 1 つだけ残す
+    assert frames == [{"type": "error", "detail": "99"}]
+    assert not sub.overflowed
+
+
+def test_control_frame_flood_overflows_and_disconnects() -> None:
+    hub, _ = _hub(subscriber_max_frames=3)
+    sub = hub.connect()
+    hub.subscribe(sub, 1)
+    # boot_id を変え続けると session_end / session_start が積み上がる
+    for boot in range(1, 10):
+        hub.publish(make_packet(boot_id=boot, seq=0, count=1))
+    assert sub.overflowed
+    assert sub.pending_frames == 0
+    assert hub.stats.overflow_disconnects == 1
+
+    async def wait() -> None:
+        await sub.next()
+
+    with pytest.raises(SubscriberOverflowError):
+        asyncio.run(wait())
