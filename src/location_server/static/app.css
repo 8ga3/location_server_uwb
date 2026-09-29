@@ -1,4 +1,6 @@
-/* 可視化ページのスタイル。色は CSS 変数に集め、Canvas と uPlot の描画も同じ変数を読む */
+/* 可視化ページのスタイル。色は CSS 変数に集め、Canvas と uPlot の描画も同じ変数を読む。
+   文字に使う色は背景とのコントラスト比 4.5:1 (WCAG AA) 以上にする。
+   --on-status はバッジと押下中のボタンの文字色で、背景の --ok / --bad / --accent に対して 4.5:1 以上になる */
 
 :root {
   --bg: #f4f6f8;
@@ -7,11 +9,13 @@
   --fg-muted: #616e7c;
   --border: #d9e2ec;
   --grid: #e4e9ef;
-  --accent: #2e86c1;
-  --ok: #2f9e44;
+  --accent: #1c6ea4;
+  --ok: #237032;
   --warn: #e0a100;
-  --bad: #d64545;
+  --bad: #c92a2a;
   --idle: #9aa5b1;
+  --badge-idle: #616e7c;
+  --on-status: #ffffff;
   --marker: #d64545;
   --ended: #7b8794;
   color-scheme: light dark;
@@ -30,6 +34,8 @@
     --warn: #fcc419;
     --bad: #ff6b6b;
     --idle: #616e7c;
+    --badge-idle: #616e7c;
+    --on-status: #111418;
     --marker: #ff6b6b;
     --ended: #9aa5b1;
   }
@@ -72,19 +78,19 @@ select, input[type="number"], button {
   padding: 3px 8px;
 }
 button { cursor: pointer; }
-button[aria-pressed="true"] { background: var(--accent); color: #fff; border-color: var(--accent); }
+button[aria-pressed="true"] { background: var(--accent); color: var(--on-status); border-color: var(--accent); }
 #slider { flex: 1; min-width: 160px; }
 
 .badge {
   padding: 2px 8px;
   border-radius: 10px;
-  background: var(--idle);
+  background: var(--badge-idle);
   color: #fff;
   font-size: 12px;
 }
-.badge.ok { background: var(--ok); }
+.badge.ok { background: var(--ok); color: var(--on-status); }
 .badge.warn { background: var(--warn); color: #1f2933; }
-.badge.bad { background: var(--bad); }
+.badge.bad { background: var(--bad); color: var(--on-status); }
 
 .message { color: var(--bad); }
 .mono { font-variant-numeric: tabular-nums; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
