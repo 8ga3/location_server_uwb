@@ -16,9 +16,10 @@ import asyncio
 import contextlib
 import logging
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass
 
-from location_server.store import ReceivedPacket, TelemetryStore
+from location_server.store import ReceivedPacket, TelemetryStore, WriteResult
 
 logger = logging.getLogger(__name__)
 
@@ -55,8 +56,11 @@ class TelemetryWriter:
         flush_interval_s: float = FLUSH_INTERVAL_S,
         flush_rows: int = FLUSH_ROWS,
         max_pending_rows: int = MAX_PENDING_ROWS,
+        on_committed: Callable[[WriteResult], None] | None = None,
     ) -> None:
         self._store = store
+        # コミットできた束の結果を受け取る。ライブ配信がセッション ID を知るために使う
+        self._on_committed = on_committed
         self._flush_interval_s = flush_interval_s
         self._flush_rows = flush_rows
         self._max_pending_rows = max_pending_rows
@@ -128,3 +132,8 @@ class TelemetryWriter:
         self.stats.committed_batches += 1
         self.stats.written_rows += result.rows
         self.stats.duplicate_rows += result.duplicate_rows
+        if self._on_committed is not None:
+            try:
+                self._on_committed(result)
+            except Exception:
+                logger.exception("書き込み結果の通知で例外が発生しました")

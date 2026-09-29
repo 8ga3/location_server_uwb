@@ -1,6 +1,8 @@
 """テレメトリ収集の起動と停止。
 
 UDP ソケット、保存タスク、統計ログのタスクをまとめてアプリの寿命に合わせる。
+受信したパケットは保存系 (`TelemetryWriter`) とライブ系 (`LiveHub`) の 2 系統へ流す (設計文書 6.3)。
+どちらも受信ループのスレッドでキューへ積むだけで、一方が例外を出しても他方へは渡す。
 """
 
 from __future__ import annotations
@@ -12,7 +14,8 @@ from dataclasses import astuple
 
 from location_server.ingest.udp import ReceiveStats, SeqTracker, TelemetryProtocol
 from location_server.ingest.writer import TelemetryWriter
-from location_server.store import TelemetryStore
+from location_server.live import LiveHub
+from location_server.store import ReceivedPacket, TelemetryStore
 
 logger = logging.getLogger(__name__)
 
@@ -22,10 +25,19 @@ STATS_LOG_INTERVAL_S = 10.0
 class IngestService:
     """UDP 受信から DB への一括保存までを受け持つ。"""
 
-    def __init__(self, store: TelemetryStore, *, stats_interval_s: float = STATS_LOG_INTERVAL_S) -> None:
+    def __init__(
+        self,
+        store: TelemetryStore,
+        *,
+        live: LiveHub | None = None,
+        stats_interval_s: float = STATS_LOG_INTERVAL_S,
+    ) -> None:
         self.tracker = SeqTracker()
         self.receive_stats = ReceiveStats()
-        self.writer = TelemetryWriter(store)
+        self.live = live
+        self.writer = TelemetryWriter(
+            store, on_committed=None if live is None else (lambda result: live.note_sessions(result.sessions))
+        )
         self._stats_interval_s = stats_interval_s
         self._transport: asyncio.DatagramTransport | None = None
         self._writer_task: asyncio.Task[None] | None = None
@@ -41,7 +53,7 @@ class IngestService:
 
     async def start(self, host: str, port: int) -> None:
         loop = asyncio.get_running_loop()
-        protocol = TelemetryProtocol(self.writer.submit, self.tracker, self.receive_stats)
+        protocol = TelemetryProtocol(self.dispatch, self.tracker, self.receive_stats)
         transport, _ = await loop.create_datagram_endpoint(lambda: protocol, local_addr=(host, port))
         self._transport = transport
         self._writer_task = asyncio.create_task(self.writer.run(), name="telemetry-writer")
@@ -70,6 +82,21 @@ class IngestService:
         else:
             await self.writer.flush()
         self.log_stats()
+
+    def dispatch(self, item: ReceivedPacket) -> None:
+        """受信したパケットを保存系とライブ系へ渡す。
+
+        ライブ系は DB のコミットを待たず、受信直後のパース結果をそのまま使う。
+        """
+        try:
+            self.writer.submit(item)
+        except Exception:
+            logger.exception("保存系へパケットを渡せませんでした")
+        if self.live is not None:
+            try:
+                self.live.publish(item.packet)
+            except Exception:
+                logger.exception("ライブ系へパケットを渡せませんでした")
 
     def log_stats(self) -> None:
         """累積の統計を 1 行で出す。形式はファームウェアのシリアルログに合わせる。"""

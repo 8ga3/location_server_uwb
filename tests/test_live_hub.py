@@ -1,0 +1,304 @@
+"""ライブ配信のハブのテスト。snapshot / append、セッションの開始と終了、遅延と重複、キューの溢れ。"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from location_server.ingest.packet import RangeRecord, TelemetryPacket
+from location_server.live import LiveHub, Subscriber
+from location_server.live.hub import END_NEW_SESSION, END_TAG_LAST, END_TIMEOUT
+from telemetry_helpers import make_packet
+
+
+class FakeClock:
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def _hub(**kwargs: Any) -> tuple[LiveHub, FakeClock]:
+    clock = FakeClock()
+    return LiveHub(clock=clock, **kwargs), clock
+
+
+def _drain(subscriber: Subscriber) -> list[dict[str, Any]]:
+    frames = []
+    while (frame := subscriber.pop_nowait()) is not None:
+        frames.append(frame)
+    return frames
+
+
+def _types(frames: list[dict[str, Any]]) -> list[str]:
+    return [frame["type"] for frame in frames]
+
+
+def test_subscribe_without_session_returns_empty_snapshot() -> None:
+    hub, _ = _hub()
+    sub = hub.connect()
+    hub.subscribe(sub, 1, 30000)
+    [snapshot] = _drain(sub)
+    assert snapshot["type"] == "snapshot"
+    assert snapshot["session_id"] is None
+    assert snapshot["active"] is False
+    assert snapshot["fix"]["t"] == []
+    assert snapshot["ranges"] == {}
+
+
+def test_publish_then_tick_sends_session_start_and_append() -> None:
+    hub, _ = _hub()
+    sub = hub.connect()
+    hub.subscribe(sub, 1)
+    _drain(sub)
+    hub.publish(make_packet(seq=0, t_tag_ms=1000, count=4, period_ms=50))
+    frames = _drain(sub)
+    assert _types(frames) == ["session_start"]
+    assert frames[0]["boot_id"] == 0xAAAAAAAA
+    assert frames[0]["session_id"] is None
+
+    hub.tick()
+    [append] = _drain(sub)
+    assert append["type"] == "append"
+    assert append["fix"]["t"] == [1000, 1050, 1100, 1150]
+    assert append["fix"]["seq"] == [0, 1, 2, 3]
+    assert append["fix"]["dt"] == [None, 50, 50, 50]
+    assert append["fix"]["x"] == [1.234] * 4
+    assert append["fix"]["y"] == [-5.678] * 4
+    assert append["fix"]["ok"] == [True] * 4
+    assert set(append["ranges"]) == {"0x0100", "0x0101", "0x0102", "0x0103"}
+    assert append["ranges"]["0x0101"]["d"] == [1.1] * 4
+    # 次の tick までに新しいサイクルが無ければ何も送らない
+    hub.tick()
+    assert _drain(sub) == []
+
+
+def test_snapshot_excludes_pending_cycles_and_respects_history() -> None:
+    hub, _ = _hub()
+    hub.publish(make_packet(seq=0, t_tag_ms=0, count=10, period_ms=1000))
+    hub.tick()
+    # まだ差分として送っていないサイクルは snapshot に入れず、次の append で送る
+    hub.publish(make_packet(seq=10, t_tag_ms=10_000, count=1))
+    sub = hub.connect()
+    hub.subscribe(sub, 1, history_ms=3000)
+    [snapshot] = _drain(sub)
+    assert snapshot["fix"]["seq"] == [6, 7, 8, 9]
+    assert snapshot["active"] is True
+    hub.tick()
+    [append] = _drain(sub)
+    assert append["fix"]["seq"] == [10]
+
+
+def test_other_tags_are_not_delivered() -> None:
+    hub, _ = _hub()
+    sub = hub.connect()
+    hub.subscribe(sub, 2)
+    _drain(sub)
+    hub.publish(make_packet(tag_id=1))
+    hub.tick()
+    assert _drain(sub) == []
+
+
+def test_late_and_duplicate_cycles_are_dropped() -> None:
+    hub, _ = _hub()
+    sub = hub.connect()
+    hub.subscribe(sub, 1)
+    hub.publish(make_packet(seq=8, count=4))
+    hub.publish(make_packet(seq=4, count=4))  # 遅れて届いた
+    hub.publish(make_packet(seq=8, count=4))  # 重複
+    hub.publish(make_packet(seq=10, t_tag_ms=1100, count=4))  # 前半 2 サイクルが重複
+    hub.tick()
+    frames = _drain(sub)
+    append = frames[-1]
+    assert append["fix"]["seq"] == [8, 9, 10, 11, 12, 13]
+    # パケットをまたいでも隣の seq なら周期を求める
+    assert append["fix"]["dt"] == [None, 50, 50, 50, 50, 50]
+    assert hub.stats.late_cycles == 10
+
+
+def test_timeout_ends_session_and_same_boot_resumes() -> None:
+    hub, clock = _hub()
+    sub = hub.connect()
+    hub.subscribe(sub, 1)
+    _drain(sub)
+    hub.publish(make_packet(seq=0))
+    hub.tick()
+    _drain(sub)
+    clock.now += 2.9
+    hub.tick()
+    assert _drain(sub) == []
+    clock.now += 0.2
+    hub.tick()
+    [end] = _drain(sub)
+    assert end == {
+        "type": "session_end",
+        "session_id": None,
+        "tag_id": 1,
+        "boot_id": 0xAAAAAAAA,
+        "reason": END_TIMEOUT,
+    }
+    # 終了後も最後の状態は snapshot で見られる
+    assert hub.snapshot(1)["active"] is False
+    assert len(hub.snapshot(1)["fix"]["t"]) == 4
+
+    hub.publish(make_packet(seq=4))
+    hub.tick()
+    frames = _drain(sub)
+    assert _types(frames) == ["session_start", "append"]
+    assert frames[0]["boot_id"] == 0xAAAAAAAA
+    assert hub.sessions[1].active
+
+
+def test_new_boot_ends_previous_session_and_ignores_stale_packets() -> None:
+    hub, _ = _hub()
+    sub = hub.connect()
+    hub.subscribe(sub, 1)
+    _drain(sub)
+    hub.publish(make_packet(boot_id=1, seq=0))
+    hub.publish(make_packet(boot_id=2, seq=0))
+    frames = _drain(sub)
+    # 旧セッションの未送信ぶんを送り切ってから終了を通知する
+    assert _types(frames) == ["session_start", "append", "session_end", "session_start"]
+    assert frames[1]["boot_id"] == 1
+    assert frames[2]["reason"] == END_NEW_SESSION
+    assert frames[3]["boot_id"] == 2
+
+    hub.publish(make_packet(boot_id=1, seq=4))
+    hub.tick()
+    frames = _drain(sub)
+    assert _types(frames) == ["append"]
+    assert frames[0]["boot_id"] == 2
+    assert hub.stats.stale_cycles == 4
+
+
+def test_last_flag_ends_session() -> None:
+    hub, _ = _hub()
+    sub = hub.connect()
+    hub.subscribe(sub, 1)
+    _drain(sub)
+    hub.publish(make_packet(seq=0, flags=0x01))
+    frames = _drain(sub)
+    assert _types(frames) == ["session_start", "append", "session_end"]
+    assert frames[2]["reason"] == END_TAG_LAST
+    # 同じ起動のパケットが後から来ても再開しない
+    hub.publish(make_packet(seq=4))
+    hub.tick()
+    assert _drain(sub) == []
+
+
+def test_ring_buffer_keeps_retention_window_and_count_limit() -> None:
+    hub, _ = _hub(retention_ms=1000, max_buffer_cycles=8)
+    hub.publish(make_packet(seq=0, t_tag_ms=0, count=4, period_ms=100))
+    hub.publish(make_packet(seq=4, t_tag_ms=1500, count=4, period_ms=100))
+    hub.tick()
+    assert [c.seq for c in hub.sessions[1].cycles] == [4, 5, 6, 7]
+    hub.publish(make_packet(seq=8, t_tag_ms=1900, count=16, period_ms=1))
+    assert len(hub.sessions[1].cycles) == 8
+    assert hub.stats.overflow_cycles == 12
+
+
+def test_slow_subscriber_drops_oldest_appends_but_keeps_control_frames() -> None:
+    hub, clock = _hub(subscriber_max_frames=3)
+    sub = hub.connect()
+    hub.subscribe(sub, 1)
+    for i in range(6):
+        hub.publish(make_packet(seq=i * 4))
+        hub.tick()
+    clock.now += 5
+    hub.tick()
+    frames = _drain(sub)
+    # snapshot と session_start / session_end は残り、append は新しいものだけが残る
+    assert _types(frames) == ["snapshot", "session_start", "session_end"]
+    assert sub.lost == 6
+    assert hub.stats.dropped_frames == 6
+
+    hub.subscribe(sub, 1)
+    assert sub.lost == 0
+
+
+def test_subscriber_queue_keeps_newest_appends() -> None:
+    hub, _ = _hub(subscriber_max_frames=4)
+    sub = hub.connect()
+    hub.subscribe(sub, 1)
+    _drain(sub)
+    hub.publish(make_packet(seq=0))
+    _drain(sub)  # session_start
+    for i in range(1, 7):
+        hub.publish(make_packet(seq=i * 4))
+        hub.tick()
+    frames = _drain(sub)
+    assert [f["fix"]["seq"][0] for f in frames] == [12, 16, 20, 24]
+    assert sub.lost == 2
+
+
+def test_hello_before_udp_fills_session_id_and_config_rev() -> None:
+    hub, _ = _hub()
+    sub = hub.connect()
+    hub.subscribe(sub, 1)
+    _drain(sub)
+    hub.note_hello(1, 0xAAAAAAAA, 12, 7)
+    hub.publish(make_packet(seq=0))
+    [start] = _drain(sub)
+    assert (start["session_id"], start["config_rev"]) == (12, 7)
+
+
+def test_hello_after_udp_resends_session_start() -> None:
+    hub, _ = _hub()
+    sub = hub.connect()
+    hub.subscribe(sub, 1)
+    hub.publish(make_packet(seq=0))
+    _drain(sub)
+    hub.note_hello(1, 0xAAAAAAAA, 12, 7)
+    [start] = _drain(sub)
+    assert start["type"] == "session_start"
+    assert (start["session_id"], start["config_rev"]) == (12, 7)
+    # 構成リビジョンが変わらない hello では送り直さない
+    hub.note_hello(1, 0xAAAAAAAA, 12, 7)
+    assert _drain(sub) == []
+
+
+def test_committed_session_id_is_attached_to_later_appends() -> None:
+    hub, _ = _hub()
+    sub = hub.connect()
+    hub.subscribe(sub, 1)
+    hub.publish(make_packet(seq=0))
+    hub.note_sessions({(1, 0xAAAAAAAA): 5, (9, 1): 6})
+    hub.publish(make_packet(seq=4))
+    hub.tick()
+    assert _drain(sub)[-1]["session_id"] == 5
+
+
+def test_failed_fix_and_failed_range_are_null() -> None:
+    hub, _ = _hub()
+    packet = make_packet(seq=0, count=1)
+    cycle = packet.cycles[0]
+    failed = TelemetryPacket(
+        flags=0,
+        tag_id=1,
+        boot_id=packet.boot_id,
+        seq=0,
+        t_tag_ms=cycle.t_tag_ms,
+        anchor_n=packet.anchor_n,
+        cycles=(
+            type(cycle)(
+                seq=0,
+                t_tag_ms=cycle.t_tag_ms,
+                fix_flags=0,
+                used_count=2,
+                x_mm=0,
+                y_mm=0,
+                z_mm=0,
+                residual_mm=0,
+                ranges=(RangeRecord(0x0100, 3, 7, 0), *cycle.ranges[1:]),
+            ),
+        ),
+    )
+    hub.publish(failed)
+    snapshot_after = hub.connect()
+    hub.tick()
+    hub.subscribe(snapshot_after, 1)
+    [snapshot] = _drain(snapshot_after)
+    assert snapshot["fix"]["ok"] == [False]
+    assert snapshot["fix"]["x"] == [None]
+    assert snapshot["fix"]["used"] == [2]
+    assert snapshot["ranges"]["0x0100"] == {"t": [1000], "seq": [0], "d": [None], "st": [3], "el": [7]}

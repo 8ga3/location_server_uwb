@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>UWB 測位ビューア</title>
+<link rel="stylesheet" href="/static/vendor/uplot/uPlot.min.css">
+<link rel="stylesheet" href="/static/app.css">
+<script src="/static/vendor/uplot/uPlot.iife.min.js"></script>
+<script type="module" src="/static/js/main.js"></script>
+</head>
+<body>
+<header class="bar">
+  <h1>UWB 測位ビューア</h1>
+  <label>表示
+    <select id="source">
+      <option value="live">ライブ</option>
+    </select>
+  </label>
+  <label id="tag-field">タグ ID
+    <input id="tag-id" type="number" min="1" max="255" value="1">
+  </label>
+  <button id="reload-sessions" type="button" title="セッション一覧を読み直す">一覧を更新</button>
+  <span id="conn" class="badge">未接続</span>
+  <span id="message" class="message" role="status"></span>
+</header>
+
+<main class="layout">
+  <section class="panel xy-panel" aria-label="XY 軌跡">
+    <div class="panel-head">
+      <h2>XY 軌跡</h2>
+      <label class="check"><input id="fit-trail" type="checkbox"> 軌跡に合わせて表示範囲を広げる</label>
+    </div>
+    <div class="xy-wrap"><canvas id="xy"></canvas></div>
+  </section>
+
+  <section class="panel summary-panel" aria-label="サマリ">
+    <div class="panel-head"><h2 id="summary-title">サマリ</h2></div>
+    <dl id="summary" class="stats"></dl>
+    <table id="anchor-table" class="anchors">
+      <thead><tr id="anchor-head"></tr></thead>
+      <tbody id="anchor-body"></tbody>
+    </table>
+    <h3>選択時刻</h3>
+    <dl id="cursor-info" class="stats"></dl>
+  </section>
+
+  <section class="panel charts-panel" aria-label="時系列">
+    <div class="chart" id="chart-range"></div>
+    <div class="chart" id="chart-period"></div>
+    <div class="chart" id="chart-quality"></div>
+  </section>
+</main>
+
+<footer class="bar controls">
+  <div id="live-controls" class="group">
+    <button id="pause" type="button">一時停止</button>
+    <span id="live-status"></span>
+  </div>
+  <div id="replay-controls" class="group" hidden>
+    <button id="play" type="button">再生</button>
+    <select id="speed" aria-label="再生速度">
+      <option value="1">1×</option>
+      <option value="4">4×</option>
+      <option value="16">16×</option>
+    </select>
+    <input id="slider" type="range" min="0" max="0" step="1" value="0" aria-label="時刻">
+    <span id="slider-label" class="mono"></span>
+    <button id="zoom-reset" type="button">全体表示</button>
+  </div>
+</footer>
+</body>
+</html>
