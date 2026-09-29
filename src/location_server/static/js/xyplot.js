@@ -30,6 +30,21 @@ function isEmpty(box) {
   return !(box.minX <= box.maxX);
 }
 
+// 測距円の半径 (アンカーとタグの高さの差を除いた水平距離)。円にできない値は null を返す。
+// 負の距離や高さの差より短い距離は、二乗や 0 への丸めで「もっともらしい円」に見えてしまうので描かない。
+// デバッグで見たい異常値なので、表と時系列には生の値のまま残す
+export function horizontalRange(d, dz) {
+  if (d === null || d === undefined || !(d >= 0)) return null;
+  const h2 = d * d - dz * dz;
+  return h2 >= 0 ? Math.sqrt(h2) : null;
+}
+
+// 選択時刻に測位していた高さ。測位に失敗したサイクルでは直前に成功していた値を使う
+export function tagHeightAt(data, index) {
+  const good = data.lastGoodBefore(index);
+  return good >= 0 ? data.fix.z[good] : null;
+}
+
 export class XYPlot {
   constructor(canvas) {
     this.canvas = canvas;
@@ -175,15 +190,14 @@ export class XYPlot {
     const { ctx } = this;
     const { data, colors } = view;
     const fix = data.fix;
-    const good = data.lastGoodBefore(cursor);
-    const tagZ = good >= 0 ? fix.z[good] : null;
+    const tagZ = tagHeightAt(data, cursor);
     const ranges = data.rangesNear(fix.t[cursor]);
     ctx.lineWidth = 1.5;
     for (const [id, r] of ranges) {
       const anchor = data.anchorById(id);
       if (!anchor || r.d === null || r.st !== 0) continue;
-      const dz = tagZ === null ? 0 : anchor.z - tagZ;
-      const horizontal = Math.sqrt(Math.max(0, r.d * r.d - dz * dz));
+      const horizontal = horizontalRange(r.d, tagZ === null ? 0 : anchor.z - tagZ);
+      if (horizontal === null) continue;
       ctx.strokeStyle = colors.get(id) ?? "#888";
       ctx.globalAlpha = 0.8;
       ctx.beginPath();

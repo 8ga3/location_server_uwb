@@ -6,7 +6,7 @@ import { anchorColors } from "./colors.js";
 import { lampClass, liveIndicators } from "./indicators.js";
 import { lastIndexAtOrBefore, SessionData } from "./model.js";
 import { LiveSource, loadSessions, loadSummary, loadWindow } from "./sources.js";
-import { XYPlot } from "./xyplot.js";
+import { horizontalRange, tagHeightAt, XYPlot } from "./xyplot.js";
 
 // ライブの軌跡は直近 30 秒のトレイルとし、古い点から消す (設計文書 8.3)
 const TRAIL_MS = 30000;
@@ -131,10 +131,18 @@ function renderCursorInfo(index) {
   ]);
 }
 
-function rangeCell(ranges, id) {
+// 表の距離の欄。値は生のまま出し、測距円にできない値 (負、高さの差より短い) にはそう書き添える
+function rangeCell(ranges, id, tagZ) {
   const r = ranges.get(id);
   if (!r) return ["--"];
-  return r.st === 0 ? [num(r.d, 3, " m")] : [`失敗 (${r.st})`];
+  if (r.st !== 0) return [`失敗 (${r.st})`];
+  const anchor = data.anchorById(id);
+  const text = num(r.d, 3, " m");
+  if (r.d !== null && r.d < 0) return [`${text} (負の値、円なし)`];
+  if (anchor && horizontalRange(r.d, tagZ === null ? 0 : anchor.z - tagZ) === null) {
+    return [`${text} (高さの差より短い、円なし)`];
+  }
+  return [text];
 }
 
 // ------------------------------------------------------------------ 描画
@@ -253,12 +261,13 @@ function renderLiveSummary() {
     ["間引き (フレーム)", String(state.live.lost), state.live.lost > 0],
   ]);
   const ranges = data.rangesNear(data.lastT() ?? 0);
+  const tagZ = tagHeightAt(data, data.fix.t.length - 1);
   renderAnchorTable(
     ["アンカー", "直近 1 秒", "距離"],
     data.anchorIds().map((id) => {
       const a = ind?.anchors.get(id);
       const rate = a ? a.rate : null;
-      return { id, cells: [[pct(rate), lampClass(rate)], rangeCell(ranges, id)] };
+      return { id, cells: [[pct(rate), lampClass(rate)], rangeCell(ranges, id, tagZ)] };
     }),
   );
 }
@@ -364,6 +373,7 @@ function renderReplayAnchors() {
   const summary = state.replay.summary;
   const byId = new Map(summary.ranges.map((r) => [r.id, r]));
   const ranges = data.rangesNear(state.replay.cursorT);
+  const tagZ = tagHeightAt(data, data.indexNear(state.replay.cursorT));
   renderAnchorTable(
     ["アンカー", "成功率", "距離", "平均 / 最大 elapsed", "失敗の内訳"],
     data.anchorIds().map((id) => {
@@ -378,7 +388,7 @@ function renderReplayAnchors() {
         id,
         cells: [
           [pct(r?.success_rate ?? null), lampClass(r?.success_rate ?? null)],
-          rangeCell(ranges, id),
+          rangeCell(ranges, id, tagZ),
           [r ? `${num(r.elapsed_mean_ms, 1)} / ${num(r.elapsed_max_ms)} ms` : "--"],
           [failures || "なし"],
         ],
