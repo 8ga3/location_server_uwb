@@ -76,8 +76,11 @@ export class TimeCharts {
   }
 
   setCursor(tMs) {
+    if (tMs === this.cursorT) return;
     this.cursorT = tMs;
-    for (const chart of this.charts) chart.redraw(false, false);
+    // 軸も計算し直させる。作り直した直後のグラフは軸がまだ計算されておらず、
+    // redraw(false, false) では uPlot が未計算の目盛りを読んで例外になる
+    for (const chart of this.charts) chart.redraw(false, true);
   }
 
   resize() {
