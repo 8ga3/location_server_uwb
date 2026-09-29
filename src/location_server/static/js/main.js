@@ -145,7 +145,7 @@ function renderCursorInfo(index) {
   ]);
 }
 
-// 表の距離の欄。値は生のまま出し、測距円にできない値 (負、高さの差より短い) にはそう書き添える
+// 表の距離の欄。値は生のまま出し、測距円にできない値 (負、高さの差より短い、タグの高さが不明) にはそう書き添える
 function rangeCell(ranges, id, tagZ) {
   const r = ranges.get(id);
   if (!r) return ["--"];
@@ -153,7 +153,9 @@ function rangeCell(ranges, id, tagZ) {
   const anchor = data.anchorById(id);
   const text = num(r.d, 3, " m");
   if (r.d !== null && r.d < 0) return [`${text} (負の値、円なし)`];
-  if (anchor && horizontalRange(r.d, tagZ === null ? 0 : anchor.z - tagZ) === null) {
+  if (!anchor) return [text];
+  if (tagZ === null) return [`${text} (タグ高さ不明、円なし)`];
+  if (horizontalRange(r.d, anchor.z - tagZ) === null) {
     return [`${text} (高さの差より短い、円なし)`];
   }
   return [text];

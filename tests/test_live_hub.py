@@ -412,3 +412,51 @@ def test_active_session_id_arrives_by_append_only() -> None:
     _drain(sub)
     hub.note_sessions({(1, 0xAAAAAAAA): 7})
     assert _drain(sub) == []
+
+
+def _wide_packet(*, tag_id: int = 1, seq: int = 0, anchor_n: int = 255, count: int = 16) -> TelemetryPacket:
+    return make_packet(
+        tag_id=tag_id, seq=seq, count=count, anchors=tuple(0x0100 + i for i in range(anchor_n))
+    )
+
+
+def test_ring_buffer_limits_range_records_per_session() -> None:
+    """anchor_n = 255 のパケットでも、1 セッションが抱える測距レコードは上限で打ち切る。"""
+    hub, _ = _hub(max_buffer_ranges=1000)
+    for i in range(10):
+        hub.publish(_wide_packet(seq=i * 16))
+    session = hub.sessions[1]
+    assert session.range_count <= 1000
+    assert session.range_count == sum(len(c.record.ranges) for c in session.cycles)
+    assert hub.stats.overflow_cycles == 160 - len(session.cycles)
+
+
+def test_total_range_records_are_limited_across_tags() -> None:
+    """多数のタグ ID を名乗られても、全セッションの測距レコードの合計は上限に収まる。"""
+    hub, _ = _hub(max_buffer_ranges=10_000, max_total_ranges=20_000)
+    for tag_id in range(1, 30):
+        hub.publish(_wide_packet(tag_id=tag_id, count=4))
+    total = sum(session.range_count for session in hub.sessions.values())
+    assert total <= 20_000
+    # 最後に受けたタグのぶんは残る
+    assert hub.sessions[29].range_count > 0
+
+
+def test_total_limit_trims_ended_sessions_first() -> None:
+    hub, clock = _hub(max_total_ranges=3000)
+    hub.publish(_wide_packet(tag_id=1, count=8))  # 2040 件
+    clock.now += 5
+    hub.tick()  # タグ 1 は timeout で終了
+    hub.publish(_wide_packet(tag_id=2, count=8))  # 合計 4080 件
+    assert hub.sessions[2].range_count == 2040
+    assert hub.sessions[1].range_count <= 3000 - 2040
+
+
+def test_pending_cycles_dropped_by_limit_are_not_sent() -> None:
+    hub, _ = _hub(max_buffer_ranges=255 * 4)
+    sub = hub.connect()
+    hub.subscribe(sub, 1)
+    hub.publish(_wide_packet(seq=0, count=16))
+    hub.tick()
+    append = _drain(sub)[-1]
+    assert append["fix"]["seq"] == [12, 13, 14, 15]

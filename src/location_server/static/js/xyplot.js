@@ -191,12 +191,15 @@ export class XYPlot {
     const { data, colors } = view;
     const fix = data.fix;
     const tagZ = tagHeightAt(data, cursor);
+    // 一度も測位できていないとタグの高さがわからない。高さの差を 0 とみなすと 3 次元の距離を
+    // 水平の半径として描いてしまい、もっともらしい誤った円になるので、高さがわかるまでは描かない
+    if (tagZ === null) return;
     const ranges = data.rangesNear(fix.t[cursor]);
     ctx.lineWidth = 1.5;
     for (const [id, r] of ranges) {
       const anchor = data.anchorById(id);
       if (!anchor || r.d === null || r.st !== 0) continue;
-      const horizontal = horizontalRange(r.d, tagZ === null ? 0 : anchor.z - tagZ);
+      const horizontal = horizontalRange(r.d, anchor.z - tagZ);
       if (horizontal === null) continue;
       ctx.strokeStyle = colors.get(id) ?? "#888";
       ctx.globalAlpha = 0.8;

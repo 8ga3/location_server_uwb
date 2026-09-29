@@ -21,6 +21,9 @@ logger = logging.getLogger(__name__)
 
 _U32_MASK = 0xFFFFFFFF
 _HALF_RANGE = 1 << 31
+# 欠番を追跡するセッションの数の上限。未認証の UDP から boot_id を変え続けられても、
+# メモリが増え続けないようにする。溢れたら最も長く受信していないセッションから忘れる
+MAX_TRACKED_SESSIONS = 1024
 
 
 @dataclass(slots=True)
@@ -49,6 +52,9 @@ class SeqTracker:
     # 終了したセッションのぶんも含めた累計
     total_lost_cycles: int = 0
     total_late_cycles: int = 0
+    # 上限を超えて忘れたセッションの数。忘れたセッションのパケットが再び届くと、新しいセッションとして数え直す
+    evicted_sessions: int = 0
+    max_sessions: int = MAX_TRACKED_SESSIONS
     clock: Callable[[], float] = time.monotonic
 
     def observe(self, packet: TelemetryPacket) -> int:
@@ -60,6 +66,10 @@ class SeqTracker:
         if state is None:
             state = SessionSeqState(next_seq=packet.seq)
             self.sessions[key] = state
+            while len(self.sessions) > self.max_sessions:
+                # dict は挿入順を保つ。受信のたびに末尾へ移すので、先頭が最も長く受信していない
+                del self.sessions[next(iter(self.sessions))]
+                self.evicted_sessions += 1
             logger.info(
                 "テレメトリのセッションを検出しました: tag_id=%d boot_id=0x%08X seq=%d",
                 packet.tag_id,
@@ -83,6 +93,9 @@ class SeqTracker:
                 "タグがセッション終了を通知しました: tag_id=%d boot_id=0x%08X", packet.tag_id, packet.boot_id
             )
             del self.sessions[key]
+        else:
+            # 最後に受信した順に並べておく (上限を超えたときに先頭から忘れるため)
+            self.sessions[key] = self.sessions.pop(key)
         return new_lost
 
 

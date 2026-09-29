@@ -105,7 +105,8 @@ class IngestService:
         dropped = ",".join(f"{reason.value}={n}" for reason, n in sorted(recv.dropped.items()))
         logger.info(
             "INGEST_STATS,accepted=%d,rejected=%d,lost_cycles=%d,late_cycles=%d,written_rows=%d,"
-            "duplicate_rows=%d,failed_batches=%d,failed_rows=%d,dropped_packets=%d,pending_rows=%d%s",
+            "duplicate_rows=%d,failed_batches=%d,failed_rows=%d,dropped_packets=%d,pending_rows=%d,"
+            "evicted_sessions=%d%s",
             recv.accepted_packets,
             recv.dropped_packets,
             self.tracker.total_lost_cycles,
@@ -116,6 +117,7 @@ class IngestService:
             written.failed_rows,
             written.dropped_packets,
             self.writer.pending_rows,
+            self.tracker.evicted_sessions,
             f",{dropped}" if dropped else "",
         )
 
