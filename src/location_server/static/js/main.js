@@ -12,6 +12,8 @@ import { horizontalRange, tagHeightAt, XYPlot } from "./xyplot.js";
 const TRAIL_MS = 30000;
 const SUMMARY_INTERVAL_MS = 200;
 const ZOOM_FETCH_DELAY_MS = 250;
+// 送信キューで append が捨てられたときに snapshot を取り直す最短の間隔
+const RESYNC_INTERVAL_MS = 2000;
 
 const END_REASONS = {
   timeout: "タグ切断 (3 秒以上受信なし)",
@@ -29,7 +31,19 @@ const state = {
   dirty: true,
   lastSummaryAt: -Infinity,
   summaryPending: false,
-  live: { tagId: 1, paused: false, lost: 0, lastFrameAt: null, endReason: null },
+  live: {
+    tagId: 1,
+    paused: false,
+    // lost はサーバーが数える、この購読で捨てた append の累計 (購読し直すと 0 に戻る)。
+    // lostTotal はページを開いてからの累計、resyncPending は取り直しを待っている間 true
+    lost: 0,
+    lostTotal: 0,
+    resyncPending: false,
+    lastResyncAt: -Infinity,
+    resyncTimer: null,
+    lastFrameAt: null,
+    endReason: null,
+  },
   replay: null,
 };
 
@@ -256,9 +270,12 @@ function renderLiveSummary() {
     ["状態", info.boot_id === null ? "受信待ち" : info.active ? "受信中" : "終了", !info.active && info.boot_id !== null],
     ["測位レート (1 秒)", ind ? num(ind.fixRateHz, 1, " Hz") : "--"],
     ["サイクル (1 秒)", ind ? num(ind.cycleRateHz, 1, " Hz") : "--"],
-    ["欠測率 (1 秒)", ind ? pct(ind.lossRate) : "--", ind && ind.missing > 0],
+    // 送信キューで捨てた append の穴を UDP の欠測と取り違えないよう、取り直すまでは欠測率を出さない
+    state.live.resyncPending
+      ? ["欠測率 (1 秒)", "-- (再同期中)"]
+      : ["欠測率 (1 秒)", ind ? pct(ind.lossRate) : "--", ind && ind.missing > 0],
     ["連続失敗", ind ? String(ind.consecutiveFailures) : "--", ind && ind.consecutiveFailures > 0],
-    ["間引き (フレーム)", String(state.live.lost), state.live.lost > 0],
+    ["間引き (フレーム)", String(state.live.lostTotal), state.live.lostTotal > 0],
   ]);
   const ranges = data.rangesNear(data.lastT() ?? 0);
   const tagZ = tagHeightAt(data, data.fix.t.length - 1);
@@ -290,7 +307,9 @@ function onFrame(frame) {
       data.setInfo(frame);
       data.setAnchors(frame.anchors, frame.anchors_rev);
       data.append(frame.fix, frame.ranges);
+      // サーバーは購読し直すと lost を 0 から数え直す。取り直した snapshot で穴も埋まる
       state.live.lost = 0;
+      state.live.resyncPending = false;
       // 最終受信は測定値が届いた時刻だけで数える。snapshot の中身は過去のデータのことがある
       state.live.lastFrameAt = null;
       state.live.endReason = frame.active || frame.boot_id === null ? null : "ended";
@@ -307,7 +326,7 @@ function onFrame(frame) {
       if (frame.session_id !== null) data.info.session_id = frame.session_id;
       data.append(frame.fix, frame.ranges);
       if (data.lastT() !== null) data.trimBefore(data.lastT() - TRAIL_MS);
-      state.live.lost = frame.lost ?? 0;
+      noteLost(frame.lost ?? 0);
       if (frame.fix.t.length > 0) state.live.lastFrameAt = performance.now();
       break;
     case "session_end":
@@ -316,6 +335,14 @@ function onFrame(frame) {
         state.live.endReason = frame.reason;
       }
       break;
+    case "session_info":
+      // 終了済みのセッションの ID や構成リビジョンが、コミットや hello で後からわかった
+      if (frame.boot_id === data.info.boot_id) {
+        if (frame.session_id !== null) data.info.session_id = frame.session_id;
+        if (frame.config_rev !== null) data.info.config_rev = frame.config_rev;
+        state.summaryPending = true;
+      }
+      return;
     case "error":
       showMessage(`サーバー: ${frame.detail}`);
       return;
@@ -323,6 +350,28 @@ function onFrame(frame) {
       return;
   }
   state.dirty = true;
+}
+
+// append の lost が増えたら、その間の append が届いていない。継ぎ足したデータには穴があるので、
+// snapshot を取り直して埋める。遅いクライアントで取り直しが続かないよう、間隔は RESYNC_INTERVAL_MS 以上空ける
+function noteLost(lost) {
+  const added = lost - state.live.lost;
+  state.live.lost = lost;
+  if (added <= 0) return;
+  state.live.lostTotal += added;
+  state.live.resyncPending = true;
+  requestResync();
+}
+
+function requestResync() {
+  if (state.live.resyncTimer !== null) return;
+  const wait = Math.max(0, state.live.lastResyncAt + RESYNC_INTERVAL_MS - performance.now());
+  state.live.resyncTimer = setTimeout(() => {
+    state.live.resyncTimer = null;
+    if (state.mode !== "live" || !state.live.resyncPending) return;
+    state.live.lastResyncAt = performance.now();
+    live.subscribe(state.live.tagId, TRAIL_MS);
+  }, wait);
 }
 
 function startLive(tagId) {
@@ -334,6 +383,9 @@ function startLive(tagId) {
   state.live.tagId = tagId;
   state.live.endReason = null;
   state.live.lastFrameAt = null;
+  state.live.lost = 0;
+  state.live.lostTotal = 0;
+  state.live.resyncPending = false;
   data.clear();
   data.setAnchors([], null);
   $("tag-field").hidden = false;
@@ -583,10 +635,25 @@ async function reloadSessions() {
       options.push(new Option(`#${s.id} タグ ${s.tag_id} ${started} (${s.cycles} サイクル)`, String(s.id)));
     }
     select.replaceChildren(...options);
-    select.value = [...select.options].some((o) => o.value === current) ? current : "live";
+    if (state.mode === "replay" && current !== "live") {
+      // 再生中のセッションが最新の一覧から外れても、表示と選択肢を食い違わせない
+      selectSessionOption(current);
+    } else {
+      select.value = [...select.options].some((o) => o.value === current) ? current : "live";
+    }
   } catch (error) {
     showMessage(`セッション一覧を読めませんでした: ${error.message}`);
   }
+}
+
+// セッションを選択肢で選んだ状態にする。一覧 (最新 100 件) に無ければ選択肢を足す
+function selectSessionOption(id) {
+  const select = $("source");
+  const value = String(id);
+  if (![...select.options].some((o) => o.value === value)) {
+    select.append(new Option(`#${value} (一覧の範囲外)`, value));
+  }
+  select.value = value;
 }
 
 function tagIdFromInput() {
@@ -648,9 +715,8 @@ setInterval(() => {
 function startFromHash() {
   const match = /^#(tag|session)=(\d+)$/.exec(location.hash);
   if (match && match[1] === "session") {
-    openReplay(Number(match[2])).then(() => {
-      $("source").value = match[2];
-    });
+    selectSessionOption(match[2]);
+    openReplay(Number(match[2]));
     return;
   }
   const tagId = match ? Number(match[2]) : 1;

@@ -7,12 +7,14 @@ DB には一切触れない。保存系が詰まってもライブ表示を止�
 イベントループのスレッドだけから呼ぶ前提で、ロックは持たない。受信ループ (`publish`)、
 定期処理 (`tick`)、WebSocket の各接続がすべて同じループの上で動く。
 
-購読者へ送るフレームは次の 5 種類。`snapshot` と `session_start` の `anchors` は、
+購読者へ送るフレームは次の 6 種類。`snapshot` と `session_start` の `anchors` は、
 DB を読む必要があるので WebSocket の接続ごとの送信処理で足す (`routes_live`)。
 
 - `snapshot`: 購読した直後に 1 回だけ、直近 `history_ms` ぶんをまとめて送る
 - `append`: 以降の差分。`tick()` ごと (50 ms) にまとめて送る
 - `session_start` / `session_end`: セッションの開始と終了
+- `session_info`: 終了済みのセッションの `session_id` / `config_rev` が後からわかったときの通知。
+  稼働中のセッションなら append (と hello 後の `session_start`) に載るので送らない
 - `error`: 購読要求の誤り
 """
 
@@ -166,7 +168,8 @@ class Subscriber:
         """フレームを積む。上限を超えたら古い append から捨てる。
 
         - `error` は未送信のものを 1 つだけ残し、新しいものに置き換える。誤った要求を連打されても溜まらない
-        - `snapshot` / `session_start` / `session_end` は捨てない。落とすとクライアントの状態が食い違うため
+        - `snapshot` / `session_start` / `session_end` / `session_info` は捨てない。落とすとクライアントの状態が
+          食い違うため
         - それでもハード上限 (`max_frames` の 2 倍) を超えたら、キューを捨てて `overflowed` を立てる。
           送信側は接続を閉じ、ページは再接続して snapshot から取り直す。偽の UDP パケットで
           `session_start` / `session_end` を大量に起こされても、接続ごとのメモリが有限に収まる
@@ -377,18 +380,29 @@ class LiveHub:
         session = self.sessions.get(tag_id)
         if session is None or session.boot_id != boot_id:
             return
+        changed = session.session_id != session_id
         session.session_id = session_id
         if config_rev is not None and config_rev != session.config_rev:
             session.config_rev = config_rev
+            changed = True
             if session.active:
                 self._broadcast(tag_id, self._session_start_frame(session))
+                return
+        if changed and not session.active:
+            self._broadcast(tag_id, self._session_info_frame(session))
 
     def note_sessions(self, sessions: Mapping[tuple[int, int], int]) -> None:
-        """保存系がコミットしたセッション ID を覚える。以降の append に `session_id` が載る。"""
+        """保存系がコミットしたセッション ID を覚える。
+
+        稼働中のセッションなら以降の append に `session_id` が載る。hello の無い短いセッションが
+        コミットより先に終わっていた場合は、以降 append が無いので `session_info` で知らせる。
+        """
         for (tag_id, boot_id), session_id in sessions.items():
             session = self.sessions.get(tag_id)
             if session is not None and session.boot_id == boot_id and session.session_id is None:
                 session.session_id = session_id
+                if not session.active:
+                    self._broadcast(tag_id, self._session_info_frame(session))
 
     # ------------------------------------------------------------ 定期処理
 
@@ -487,6 +501,9 @@ class LiveHub:
             latest = cycles[-1].t_ms
             while len(cycles) > 1 and latest - cycles[0].t_ms > self._retention_ms:
                 cycles.popleft()
+
+    def _session_info_frame(self, session: LiveSession) -> Frame:
+        return {"type": "session_info", **session.identity(), "config_rev": session.config_rev}
 
     def _session_start_frame(self, session: LiveSession) -> Frame:
         return {"type": "session_start", **session.identity(), "config_rev": session.config_rev}
