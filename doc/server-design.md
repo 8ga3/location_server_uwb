@@ -520,6 +520,9 @@ WS /api/v1/ws/live
 { "type": "session_end", "session_id": 12, "tag_id": 1, "boot_id": 2863311530, "reason": "timeout" }
 { "type": "session_start", "session_id": 13, "tag_id": 1, "boot_id": 1431655765, "config_rev": 7,
   "anchors_rev": 7, "anchors": [ ... ] }
+
+// server -> client: 終了済みのセッションの session_id / config_rev が後からわかった
+{ "type": "session_info", "session_id": 13, "tag_id": 1, "boot_id": 1431655765, "config_rev": null }
 ```
 
 #### snapshot + append にする理由
@@ -559,6 +562,10 @@ FastAPI が標準で対応しており、追加の依存も要らない。
 - `config_rev` は hello でしかわからない。hello より先に UDP が届いたセッションは現在の構成の座標を配り、
   どのリビジョンを配ったかを `anchors_rev` で示す。その後 hello で構成リビジョンがわかったら
   `session_start` を送り直し、クライアントに座標を取り直させる
+- セッションが終わった後で `session_id` や `config_rev` がわかった場合は `session_info` で知らせる。
+  hello の無い短いセッションが最初のコミットより先に終わると、以降 append が無いので、ほかに知らせる手段が無い。
+  稼働中のセッションでは append と `session_start` に載るので `session_info` は送らない。`session_info` も
+  捨てない制御フレームとして扱う
 - リングバッファは直近 60 秒 (タグの `millis()` で測る) とし、件数でも 4096 サイクル (30 Hz の 60 秒の約 2 倍) で
   打ち切る。`millis()` が飛んだ場合でもメモリを食い続けないようにするためである。終了したセッションも、
   次のセッションが始まるまでは最後の状態を残し、後から開いたページでも止まる直前の軌跡が見えるようにする
@@ -567,12 +574,16 @@ FastAPI が標準で対応しており、追加の依存も要らない。
 - snapshot には、まだ append として送っていないサイクルを含めない。それらは購読の直後に送る最初の append で
   届くので、snapshot と append の間で抜けも重複も起きない
 - 購読者ごとのキューは 20 フレーム (約 1 秒) を上限とし、溢れたら古い append から捨てる。
-  `snapshot` / `session_start` / `session_end` は捨てない。これらを落とすとクライアントの状態が食い違うためである
+  `snapshot` / `session_start` / `session_end` / `session_info` は捨てない。これらを落とすとクライアントの状態が
+  食い違うためである
 - `error` は未送信のものを 1 つだけ残し、新しいものに置き換える。誤った購読要求を連打されてもキューに溜まらない
 - それでもキューがハード上限 (40 フレーム、上限の 2 倍) を超えたら、キューを捨てて接続を close code 1013
   (Try Again Later) で閉じる。偽の UDP パケットで `boot_id` を変え続けられると `session_end` / `session_start` が
   積み上がるため、捨てられないフレームにも接続ごとの上限を設ける。ページは再接続して snapshot から取り直す
 - `lost` は購読してからその接続で捨てた append の累計とする。購読をやり直すと 0 に戻る
+- ページは `lost` が増えたら、その間の append が抜けているので、購読をやり直して snapshot で穴を埋める。
+  抜けた `seq` を UDP の欠測と取り違えないよう、取り直すまでは欠測率を表示しない。遅いクライアントで
+  取り直しが続かないよう、取り直しは 2 秒以上の間隔を空ける。捨てたフレームの数はページを開いてからの累計で表示する
 - `session_end` の `reason` は `timeout` (3 秒以上受信なし)、`new_session` (同じタグの別の `boot_id` を受けた)、
   `tag_end` (`flags` の bit0 を受けた) の 3 つとする。`timeout` のあとに同じ `boot_id` のパケットが届いたら
   (Wi-Fi の再接続など)、同じセッションとして `session_start` を送って再開する。`new_session` と `tag_end` で

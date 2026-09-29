@@ -376,3 +376,39 @@ def test_stats_log_records_active_session_change(caplog: pytest.LogCaptureFixtur
         asyncio.run(scenario())
     lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("LIVE_STATS")]
     assert [line.split(",")[1] for line in lines] == ["active_sessions=1", "active_sessions=0"]
+
+
+def test_session_id_of_ended_session_is_notified() -> None:
+    """hello の無い短いセッションがコミットより先に終わっても、確定した ID を session_info で知らせる。"""
+    hub, _ = _hub()
+    sub = hub.connect()
+    hub.subscribe(sub, 1)
+    _drain(sub)
+    hub.publish(make_packet(seq=0, flags=0x01))
+    assert _types(_drain(sub)) == ["session_start", "append", "session_end"]
+    hub.note_sessions({(1, 0xAAAAAAAA): 7})
+    [info] = _drain(sub)
+    assert info == {
+        "type": "session_info",
+        "session_id": 7,
+        "tag_id": 1,
+        "boot_id": 0xAAAAAAAA,
+        "config_rev": None,
+    }
+    # 同じ ID を再び受けても送り直さない
+    hub.note_sessions({(1, 0xAAAAAAAA): 7})
+    assert _drain(sub) == []
+    # 終了後の hello で構成リビジョンがわかった場合も知らせる
+    hub.note_hello(1, 0xAAAAAAAA, 7, 3)
+    [info] = _drain(sub)
+    assert (info["type"], info["config_rev"]) == ("session_info", 3)
+
+
+def test_active_session_id_arrives_by_append_only() -> None:
+    hub, _ = _hub()
+    sub = hub.connect()
+    hub.subscribe(sub, 1)
+    hub.publish(make_packet(seq=0))
+    _drain(sub)
+    hub.note_sessions({(1, 0xAAAAAAAA): 7})
+    assert _drain(sub) == []
