@@ -250,3 +250,15 @@ def test_seq_wrap_is_unrolled(client: TestClient) -> None:
     [session] = client.get("/api/v1/sessions").json()["sessions"]
     assert (session["cycles"], session["missing_cycles"]) == (4, 0)
     assert client.get(f"/api/v1/sessions/{session_id}/summary").json()["period_max_ms"] == 100
+
+
+def test_seq_wrap_boundary_is_half_range(client: TestClient) -> None:
+    """seq の最小値と最大値の差がちょうど 2^31 なら折り返したとみなす (設計文書 5.5)。"""
+    telemetry: TelemetryStore = client.app.state.telemetry_store  # type: ignore[attr-defined]
+    session_id = _write(
+        telemetry,
+        make_packet(seq=2**31, t_tag_ms=1000, count=1),
+        make_packet(seq=0, t_tag_ms=2000, count=1),
+    )
+    fix = client.get(f"/api/v1/sessions/{session_id}/track").json()["fix"]
+    assert fix["seq"] == [2**31, 2**32]

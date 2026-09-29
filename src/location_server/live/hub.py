@@ -420,7 +420,7 @@ class LiveHub:
         logger.info(
             "LIVE_STATS,active_sessions=%d,subscribers=%d,published_cycles=%d,late_cycles=%d,"
             "stale_cycles=%d,overflow_cycles=%d,dropped_frames=%d,overflow_disconnects=%d",
-            sum(1 for session in self.sessions.values() if session.active),
+            self._active_session_count(),
             len(self._subscribers),
             s.published_cycles,
             s.late_cycles,
@@ -430,11 +430,16 @@ class LiveHub:
             s.overflow_disconnects,
         )
 
+    def _active_session_count(self) -> int:
+        return sum(1 for session in self.sessions.values() if session.active)
+
     async def _log_stats_periodically(self) -> None:
         previous: tuple[object, ...] | None = None
         while True:
             await asyncio.sleep(self._stats_interval_s)
-            current = (*astuple(self.stats), len(self._subscribers))
+            # log_stats() が出す値をすべて比べる。
+            # timeout で稼働中のセッションが 0 になっただけの変化も記録する
+            current = (*astuple(self.stats), len(self._subscribers), self._active_session_count())
             if current != previous:
                 self.log_stats()
                 previous = current
