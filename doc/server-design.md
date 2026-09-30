@@ -566,6 +566,8 @@ FastAPI が標準で対応しており、追加の依存も要らない。
 - `config_rev` は hello でしかわからない。hello より先に UDP が届いたセッションは現在の構成の座標を配り、
   どのリビジョンを配ったかを `anchors_rev` で示す。その後 hello で構成リビジョンがわかったら
   `session_start` を送り直し、クライアントに座標を取り直させる
+- ライブ系へ渡す構成リビジョンは、hello を記録した後に DB が持つ値とする。再送された hello で `config_rev` が
+  省略されても DB は既存の値を残す (5.2) ので、ライブ系も同じ値を使い、後から始まるセッションの座標を誤らない
 - セッションが終わった後で `session_id` や `config_rev` がわかった場合は `session_info` で知らせる。
   hello の無い短いセッションが最初のコミットより先に終わると、以降 append が無いので、ほかに知らせる手段が無い。
   稼働中のセッションでは append と `session_start` に載るので `session_info` は送らない。`session_info` も

@@ -733,7 +733,10 @@ function startFromHash() {
     openReplay(Number(match[2]));
     return;
   }
-  const tagId = match ? Number(match[2]) : 1;
+  // URL から読んだタグ ID にも入力欄と同じ範囲 (1..255) を課し、外れていれば既定の 1 に戻す
+  const fromHash = match ? Number(match[2]) : null;
+  const tagId = fromHash !== null && fromHash >= 1 && fromHash <= 255 ? fromHash : 1;
+  if (fromHash !== null && tagId !== fromHash) showMessage(`タグ ID は 1..255 です (${fromHash} を 1 に戻しました)`);
   $("tag-id").value = String(tagId);
   startLive(tagId);
 }

@@ -213,3 +213,18 @@ def test_session_info_carries_anchors_of_confirmed_revision(client: TestClient) 
     assert (info["config_rev"], info["anchors_rev"]) == (2, 2)
     assert info["anchors"][0]["x"] == 0.0
     assert "lost" in info
+
+
+def test_hello_resend_without_config_rev_keeps_revision_for_live(client: TestClient) -> None:
+    """config_rev を省略した hello の再送で、ライブ配信の構成リビジョンが失われない。"""
+    client.put("/api/v1/anchors/0x0100", json=ANCHOR_BODY)  # rev 2
+    client.put("/api/v1/anchors/0x0100", json={**ANCHOR_BODY, "x": 1.0})  # rev 3 (現在)
+    hello = {"tag_id": 1, "boot_id": 0xAAAAAAAA}
+    client.post("/api/v1/hello", json={**hello, "config_rev": 2})
+    client.post("/api/v1/hello", json=hello)  # 再送で config_rev を省略
+    with client.websocket_connect("/api/v1/ws/live") as ws:
+        ws.send_json({"op": "subscribe", "tag_id": 1})
+        ws.receive_json()
+        _publish(client, seq=0)
+        start = _receive_until(ws, "session_start")
+    assert (start["config_rev"], start["anchors_rev"]) == (2, 2)

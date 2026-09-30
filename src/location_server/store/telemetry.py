@@ -36,6 +36,14 @@ class ReceivedPacket:
 
 
 @dataclass(frozen=True, slots=True)
+class HelloResult:
+    """hello を記録した結果。`config_rev` は本文で省略された場合も含め、記録後にセッションが持つ値。"""
+
+    session_id: int
+    config_rev: int | None
+
+
+@dataclass(frozen=True, slots=True)
 class WriteResult:
     """1 回の一括書き込みの結果。`rows` は実際に挿入された行数 (重複で捨てた行は含まない)。"""
 
@@ -63,11 +71,12 @@ class TelemetryStore:
         fw_version: str | None,
         config_rev: int | None,
         now: str,
-    ) -> int:
-        """セッション開始通知を記録し、セッション ID を返す。
+    ) -> HelloResult:
+        """セッション開始通知を記録し、セッション ID と記録後の構成リビジョンを返す。
 
         UDP の受信で先にセッションが作られていた場合も、`fw_version` と `config_rev` を書き足す。
         本文で省略された (`None` の) 項目は、既に記録されている値を消さずに残す。
+        返す `config_rev` はこの残した値で、ライブ配信にも DB と同じ値を渡すために使う。
         """
         with self._lock, Transaction(self._conn):
             row = self._conn.execute(
@@ -77,7 +86,7 @@ class TelemetryStore:
                     fw_version = coalesce(?, fw_version),
                     last_seen_at = max(last_seen_at, ?)
                 WHERE tag_id = ? AND boot_id = ?
-                RETURNING id
+                RETURNING id, config_rev
                 """,
                 (config_rev, fw_version, now, tag_id, boot_id),
             ).fetchone()
@@ -86,12 +95,11 @@ class TelemetryStore:
                     """
                     INSERT INTO session (tag_id, boot_id, config_rev, fw_version, started_at, last_seen_at)
                     VALUES (?, ?, ?, ?, ?, ?)
-                    RETURNING id
+                    RETURNING id, config_rev
                     """,
                     (tag_id, boot_id, config_rev, fw_version, now, now),
                 ).fetchone()
-        session_id: int = row[0]
-        return session_id
+        return HelloResult(session_id=row[0], config_rev=row[1])
 
     def write_packets(self, received: Sequence[ReceivedPacket]) -> WriteResult:
         """パケット群を 1 トランザクションで書き込む。
