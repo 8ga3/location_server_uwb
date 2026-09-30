@@ -262,3 +262,19 @@ def test_seq_wrap_boundary_is_half_range(client: TestClient) -> None:
     )
     fix = client.get(f"/api/v1/sessions/{session_id}/track").json()["fix"]
     assert fix["seq"] == [2**31, 2**32]
+
+
+def test_anchor_first_seen_after_wrap_uses_session_unwrap(client: TestClient) -> None:
+    """折り返した後に初めて現れたアンカーの測距も、同じサイクルの測位と同じ展開値になる。"""
+    telemetry: TelemetryStore = client.app.state.telemetry_store  # type: ignore[attr-defined]
+    start = 0xFFFFFFFF - 50
+    session_id = _write(
+        telemetry,
+        make_packet(seq=0xFFFFFFFE, t_tag_ms=start, count=2, period_ms=50),
+        make_packet(seq=0, t_tag_ms=start + 100 - 2**32, count=2, period_ms=50, anchors=(*ANCHORS, 0x0104)),
+    )
+    fix = client.get(f"/api/v1/sessions/{session_id}/track").json()["fix"]
+    ranges = client.get(f"/api/v1/sessions/{session_id}/ranges").json()["ranges"]
+    assert ranges["0x0104"]["seq"] == fix["seq"][2:] == [2**32, 2**32 + 1]
+    assert ranges["0x0104"]["t"] == fix["t"][2:] == [start + 100, start + 150]
+    assert ranges["0x0100"]["seq"] == fix["seq"]
