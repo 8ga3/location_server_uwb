@@ -7,7 +7,7 @@ DB には一切触れない。保存系が詰まってもライブ表示を止�
 イベントループのスレッドだけから呼ぶ前提で、ロックは持たない。受信ループ (`publish`)、
 定期処理 (`tick`)、WebSocket の各接続がすべて同じループの上で動く。
 
-購読者へ送るフレームは次の 6 種類。`snapshot` と `session_start` の `anchors` は、
+購読者へ送るフレームは次の 6 種類。`snapshot` / `session_start` / `session_info` の `anchors` は、
 DB を読む必要があるので WebSocket の接続ごとの送信処理で足す (`routes_live`)。
 
 - `snapshot`: 購読した直後に 1 回だけ、直近 `history_ms` ぶんをまとめて送る
@@ -76,10 +76,24 @@ _U32_MASK = 0xFFFFFFFF
 _HALF_RANGE = 1 << 31
 
 
-def _ms_after(later: int, earlier: int) -> int:
-    """`millis()` の 32 ビット折り返しを考慮した `later - earlier`。負になる場合は負を返す。"""
-    diff = (later - earlier) & _U32_MASK
-    return diff if diff < _HALF_RANGE else diff - (1 << 32)
+def _seq_advances(seq: int, last_seq: int) -> bool:
+    """`seq` が直前より先へ進んだか。差がちょうど 2^31 も先へ進んだとみなす。
+
+    参照 API (store/query.py) はセッション内の差が 2^31 以上なら折り返したとみなして展開するので、
+    その境界でライブと再生の `seq` がずれないよう、同じ側に倒す。
+    """
+    step = (seq - last_seq) & _U32_MASK
+    return 0 < step <= _HALF_RANGE
+
+
+def _t_step(t: int, last_t: int) -> int:
+    """直前のサイクルからの時刻差を、参照 API の展開と同じ規則で求める。
+
+    参照 API は、直前より 2^31 を超えて小さくなったときだけ折り返しとみなして 2^32 を足す。
+    それ以外 (増えた場合と、2^31 以下だけ減った場合) は生の値の差をそのまま使う。
+    """
+    diff = t - last_t
+    return diff + (1 << 32) if diff < -_HALF_RANGE else diff
 
 
 @dataclass(slots=True)
@@ -352,7 +366,7 @@ class LiveHub:
             self._broadcast(tag_id, self._session_start_frame(session))
 
         for cycle in packet.cycles:
-            if session.last_seq is not None and _ms_after(cycle.seq, session.last_seq) <= 0:
+            if session.last_seq is not None and not _seq_advances(cycle.seq, session.last_seq):
                 # ライブ表示は最新を優先する。遅れて届いたサイクルは軌跡の途中へ差し込まずに捨てる。
                 # DB 側には保存系が別に書くので、再生では抜けずに見える
                 self.stats.late_cycles += 1
@@ -363,7 +377,7 @@ class LiveHub:
                 # 直前のサイクルからの差を足して、32 ビットの折り返しを展開する
                 step = (cycle.seq - session.last_seq) & _U32_MASK
                 seq_n = session.last_seq_n + step
-                t_n = session.last_t_n + _ms_after(cycle.t_tag_ms, session.last_t_raw)
+                t_n = session.last_t_n + _t_step(cycle.t_tag_ms, session.last_t_raw)
                 dt_ms = t_n - session.last_t_n if step == 1 else None
             session.last_seq = cycle.seq
             session.last_t_raw = cycle.t_tag_ms

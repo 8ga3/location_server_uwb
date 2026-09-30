@@ -93,6 +93,10 @@ async def _receive_ops(websocket: WebSocket, hub: LiveHub, subscriber: Subscribe
             hub.unsubscribe(subscriber)
 
 
+# アンカー座標を載せるフレーム。session_info は終了後に構成リビジョンがわかったときに送るので、
+# 確定したリビジョンの座標をここで引き直して渡す
+ANCHOR_CARRYING_FRAMES = frozenset({"snapshot", "session_start", "session_info"})
+
 # `lost` (この購読で捨てた append の累計) を載せるフレーム。
 # snapshot は購読の起点なので 0 と決まっていて載せない
 LOST_CARRYING_FRAMES = frozenset({"append", "session_start", "session_end", "session_info"})
@@ -112,7 +116,7 @@ async def _send_frames(websocket: WebSocket, subscriber: Subscriber, store: Conf
             await websocket.close(code=CLOSE_TRY_AGAIN_LATER, reason="live queue overflow")
             return
         kind = frame["type"]
-        if kind in ("snapshot", "session_start"):
+        if kind in ANCHOR_CARRYING_FRAMES:
             try:
                 extra = await asyncio.to_thread(_anchors_for, store, frame.get("config_rev"))
             except Exception:

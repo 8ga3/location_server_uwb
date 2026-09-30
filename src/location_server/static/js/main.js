@@ -347,12 +347,16 @@ function onFrame(frame) {
       break;
     case "session_info":
       // 終了済みのセッションの ID や構成リビジョンが、コミットや hello で後からわかった
+      // 構成リビジョンが確定したら、その座標で最後の軌跡と測距円を描き直す
       if (frame.boot_id === data.info.boot_id) {
         if (frame.session_id !== null) data.info.session_id = frame.session_id;
         if (frame.config_rev !== null) data.info.config_rev = frame.config_rev;
+        if (frame.anchors_rev !== null && frame.anchors_rev !== undefined) {
+          data.setAnchors(frame.anchors, frame.anchors_rev);
+        }
         state.summaryPending = true;
       }
-      return;
+      break;
     case "error":
       showMessage(`サーバー: ${frame.detail}`);
       return;

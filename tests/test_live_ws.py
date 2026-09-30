@@ -195,3 +195,21 @@ def test_lost_is_sent_on_control_frames_when_all_appends_are_dropped() -> None:
     sent = asyncio.run(scenario())
     assert [f["type"] for f in sent] == ["session_start", "session_end"]
     assert sent[-1]["lost"] == 4
+
+
+def test_session_info_carries_anchors_of_confirmed_revision(client: TestClient) -> None:
+    """終了後の hello で構成リビジョンが確定したら、そのリビジョンの座標を session_info に載せる。"""
+    client.put("/api/v1/anchors/0x0100", json=ANCHOR_BODY)  # rev 2 (x = 0.0)
+    client.put("/api/v1/anchors/0x0100", json={**ANCHOR_BODY, "x": 1.0})  # rev 3 (現在)
+    with client.websocket_connect("/api/v1/ws/live") as ws:
+        ws.send_json({"op": "subscribe", "tag_id": 1})
+        ws.receive_json()
+        _publish(client, seq=0, flags=0x01)  # hello の無いまま終わる短いセッション
+        start = _receive_until(ws, "session_start")
+        assert start["anchors_rev"] == 3
+        _receive_until(ws, "session_end")
+        client.post("/api/v1/hello", json={"tag_id": 1, "boot_id": 0xAAAAAAAA, "config_rev": 2})
+        info = _receive_until(ws, "session_info")
+    assert (info["config_rev"], info["anchors_rev"]) == (2, 2)
+    assert info["anchors"][0]["x"] == 0.0
+    assert "lost" in info

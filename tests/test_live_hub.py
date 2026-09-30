@@ -460,3 +460,31 @@ def test_pending_cycles_dropped_by_limit_are_not_sent() -> None:
     hub.tick()
     append = _drain(sub)[-1]
     assert append["fix"]["seq"] == [12, 13, 14, 15]
+
+
+def test_live_unwrap_matches_query_api_at_boundaries() -> None:
+    """境界の値でも、ライブの展開が参照 API (store/query.py) と同じ規則になる。"""
+    hub, _ = _hub()
+    sub = hub.connect()
+    hub.subscribe(sub, 1)
+    # seq の差がちょうど 2^31: 参照 API は折り返しとみなす (test_seq_wrap_boundary_is_half_range)
+    hub.publish(make_packet(seq=2**31, t_tag_ms=1000, count=1))
+    hub.publish(make_packet(seq=0, t_tag_ms=2000, count=1))
+    hub.tick()
+    append = [f for f in _drain(sub) if f["type"] == "append"][-1]
+    assert append["fix"]["seq"] == [2**31, 2**32]
+    assert hub.stats.late_cycles == 0
+
+
+def test_live_time_forward_jump_is_not_treated_as_wrap() -> None:
+    """時刻が 2^31 以上先へ飛んでも、参照 API と同じく生の差をそのまま足す。"""
+    hub, _ = _hub()
+    sub = hub.connect()
+    hub.subscribe(sub, 1)
+    hub.publish(make_packet(seq=0, t_tag_ms=1000, count=1))
+    hub.tick()
+    hub.publish(make_packet(seq=1, t_tag_ms=1000 + 2**31 + 5, count=1))
+    hub.tick()
+    appends = [f for f in _drain(sub) if f["type"] == "append"]
+    assert [a["fix"]["t"] for a in appends] == [[1000], [1000 + 2**31 + 5]]
+    assert appends[-1]["fix"]["dt"] == [2**31 + 5]
