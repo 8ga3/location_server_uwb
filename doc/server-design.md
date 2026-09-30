@@ -673,7 +673,9 @@ IP フラグメントは起きない。`count = 16` でも 792 バイトに収�
 飽和させても発散した方向 (符号) は残る。受信側でこの 2 つの値を見たら、実際の値はそれより
 大きい (小さい) と読む。測位の成否 (`fix_flags` の bit0) は変えない。
 
-`z_mm` だけ int16 なのは、2D 測位では固定値であり ±32 m で足りるため。
+`z_mm` だけ int16 なのは、2D 測位では固定値であり ±32 m で足りるため。3D 測位
+([multi-anchor-positioning-design.md](multi-anchor-positioning-design.md) のフェーズ 6) を入れるときは、
+z も発散しうるので `x_mm` / `y_mm` と同じ int32 に広げ、`version` を上げる。
 
 構成配信の `batch_cycles` (5.1) の上限は `count` と同じ 16 とする。`PUT /api/v1/config/telemetry` は
 17 以上を受け付けない。タグ側も念のため 16 で打ち切る。
