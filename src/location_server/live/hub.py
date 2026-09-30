@@ -14,7 +14,9 @@ DB を読む必要があるので WebSocket の接続ごとの送信処理で足
 - `append`: 以降の差分。`tick()` ごと (50 ms) にまとめて送る
 - `session_start` / `session_end`: セッションの開始と終了
 - `session_info`: 終了済みのセッションの `session_id` / `config_rev` が後からわかったときの通知。
-  稼働中のセッションなら append (と hello 後の `session_start`) に載るので送らない
+  稼働中のセッションなら append (と hello 後の `session_start`) に載るので送らない。
+  送るのはタグの現在のセッションだけで、別の `boot_id` に置き換えられたセッションには送らない
+  (ページは現在のセッションしか表示しない。設計文書 5.6)
 - `error`: 購読要求の誤り
 """
 

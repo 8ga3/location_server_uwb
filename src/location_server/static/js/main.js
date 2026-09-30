@@ -504,9 +504,10 @@ async function openReplay(sessionId) {
   try {
     const [summary, overview] = await Promise.all([loadSummary(sessionId), loadWindow(sessionId)]);
     if (state.replayToken !== token || state.mode !== "replay") return;
-    // 全体の範囲は間引いていない集計値から取る。間引いたデータの両端はセッションの両端と限らない
-    const first = summary.session.first_t_ms ?? overview.track.fix.t[0] ?? 0;
-    const last = summary.session.last_t_ms ?? overview.track.fix.t.at(-1) ?? 0;
+    // 全体の範囲は、描くデータと同じ track の応答の両端から取る。track は間引いても先頭と末尾の行を含む。
+    // summary は別のリクエストなので、書き込み中のセッションでは track と違う時点の DB を見ていることがある
+    const first = overview.track.fix.t[0] ?? summary.session.first_t_ms ?? 0;
+    const last = overview.track.fix.t.at(-1) ?? summary.session.last_t_ms ?? 0;
     state.replay = {
       sessionId,
       summary,

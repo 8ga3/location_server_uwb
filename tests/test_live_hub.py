@@ -488,3 +488,16 @@ def test_live_time_forward_jump_is_not_treated_as_wrap() -> None:
     appends = [f for f in _drain(sub) if f["type"] == "append"]
     assert [a["fix"]["t"] for a in appends] == [[1000], [1000 + 2**31 + 5]]
     assert appends[-1]["fix"]["dt"] == [2**31 + 5]
+
+
+def test_session_info_is_not_sent_for_replaced_session() -> None:
+    """置き換えられたセッションの ID が後からわかっても session_info は送らない (設計文書 5.6)。"""
+    hub, _ = _hub()
+    sub = hub.connect()
+    hub.subscribe(sub, 1)
+    hub.publish(make_packet(boot_id=1, seq=0))
+    hub.publish(make_packet(boot_id=2, seq=0))
+    _drain(sub)
+    hub.note_sessions({(1, 1): 7, (1, 2): 8})
+    assert _drain(sub) == []
+    assert hub.sessions[1].session_id == 8
