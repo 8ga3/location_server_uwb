@@ -45,6 +45,8 @@ const state = {
     endReason: null,
   },
   replay: null,
+  // 再生を選んでいるセッション。読み込み中や読み込み失敗でも選択欄と表示を合わせるために、state.replay とは別に持つ
+  replaySessionId: null,
 };
 
 const xy = new XYPlot($("xy"));
@@ -394,6 +396,7 @@ function startLive(tagId) {
   state.replay = null;
   // 読み込み途中の再生データが後から届いても、ライブの表示を上書きさせない
   state.replayToken = null;
+  state.replaySessionId = null;
   state.live.tagId = tagId;
   state.live.endReason = null;
   state.live.lastFrameAt = null;
@@ -492,6 +495,7 @@ async function openReplay(sessionId) {
   history.replaceState(null, "", `#session=${sessionId}`);
   const token = Symbol("replay");
   state.replayToken = token;
+  state.replaySessionId = sessionId;
   showMessage("");
   // 読み込みが終わるまで (失敗したときも)、直前のライブや別セッションの表示を選んだセッションとして見せない
   state.replay = null;
@@ -642,20 +646,22 @@ function togglePlayback() {
 
 async function reloadSessions() {
   const select = $("source");
-  const current = select.value;
   try {
     const sessions = await loadSessions();
+    // 選ぶ値は取得が終わった時点の表示状態から決める。取得中にライブ / 再生を切り替えた場合に、
+    // 取得前の選択を書き戻して表示と実際のデータを食い違わせないため
+    const current = state.mode === "replay" && state.replaySessionId !== null ? String(state.replaySessionId) : "live";
     const options = [new Option("ライブ", "live")];
     for (const s of sessions) {
       const started = s.started_at.replace("T", " ").slice(0, 19);
       options.push(new Option(`#${s.id} タグ ${s.tag_id} ${started} (${s.cycles} サイクル)`, String(s.id)));
     }
     select.replaceChildren(...options);
-    if (state.mode === "replay" && current !== "live") {
+    if (current !== "live") {
       // 再生中のセッションが最新の一覧から外れても、表示と選択肢を食い違わせない
       selectSessionOption(current);
     } else {
-      select.value = [...select.options].some((o) => o.value === current) ? current : "live";
+      select.value = "live";
     }
   } catch (error) {
     showMessage(`セッション一覧を読めませんでした: ${error.message}`);
