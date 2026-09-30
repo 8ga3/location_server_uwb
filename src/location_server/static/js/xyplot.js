@@ -189,12 +189,11 @@ export class XYPlot {
   _circles(view, frame, cursor) {
     const { ctx } = this;
     const { data, colors } = view;
-    const fix = data.fix;
     const tagZ = tagHeightAt(data, cursor);
     // 一度も測位できていないとタグの高さがわからない。高さの差を 0 とみなすと 3 次元の距離を
     // 水平の半径として描いてしまい、もっともらしい誤った円になるので、高さがわかるまでは描かない
     if (tagZ === null) return;
-    const ranges = data.rangesNear(fix.t[cursor]);
+    const ranges = data.rangesAtIndex(cursor);
     ctx.lineWidth = 1.5;
     for (const [id, r] of ranges) {
       const anchor = data.anchorById(id);

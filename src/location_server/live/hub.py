@@ -179,6 +179,8 @@ class Subscriber:
         self._max_frames = max_frames
         self._hard_limit = max_frames * SUBSCRIBER_HARD_LIMIT_FACTOR
         self.overflowed = False
+        # 購読を切り替えるたびに増える。送信側が待っている間に購読が変わったかを見分けるのに使う
+        self.generation = 0
         self._frames: deque[Frame] = deque()
         self._ready = asyncio.Event()
         self._stats = stats
@@ -216,6 +218,7 @@ class Subscriber:
         """購読の切り替え。積んであるフレームを捨てて `first` (snapshot) だけにする。"""
         self._frames.clear()
         self.lost = 0
+        self.generation += 1
         if first is not None:
             self.push(first)
 

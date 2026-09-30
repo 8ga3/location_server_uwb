@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import socket
+import time
 from pathlib import Path
 from typing import Any
 
@@ -13,7 +14,7 @@ from fastapi.testclient import TestClient
 from starlette.testclient import WebSocketTestSession
 from starlette.websockets import WebSocketDisconnect
 
-from location_server.api import create_app
+from location_server.api import create_app, routes_live
 from location_server.api.routes_live import _send_frames
 from location_server.ingest.packet import encode_packet
 from location_server.live import LiveHub
@@ -228,3 +229,35 @@ def test_hello_resend_without_config_rev_keeps_revision_for_live(client: TestCli
         _publish(client, seq=0)
         start = _receive_until(ws, "session_start")
     assert (start["config_rev"], start["anchors_rev"]) == (2, 2)
+
+
+def test_frames_of_old_subscription_are_not_sent_after_switch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """座標を DB から引いている間に購読が切り替わったら、古い購読の snapshot は送らない。"""
+
+    def slow_anchors(store: object, config_rev: int | None) -> dict[str, Any]:
+        time.sleep(0.05)
+        return {"anchors_rev": 1, "anchors": []}
+
+    monkeypatch.setattr(routes_live, "_anchors_for", slow_anchors)
+
+    class FakeWebSocket:
+        def __init__(self) -> None:
+            self.sent: list[dict[str, Any]] = []
+
+        async def send_text(self, text: str) -> None:
+            self.sent.append(json.loads(text))
+
+    async def scenario() -> list[dict[str, Any]]:
+        hub = LiveHub()
+        sub = hub.connect()
+        hub.subscribe(sub, 1)
+        ws = FakeWebSocket()
+        task = asyncio.create_task(_send_frames(ws, sub, store=None))  # type: ignore[arg-type]
+        await asyncio.sleep(0.01)  # タグ 1 の snapshot の座標を引いている最中
+        hub.subscribe(sub, 2)
+        await asyncio.sleep(0.2)
+        task.cancel()
+        return ws.sent
+
+    sent = asyncio.run(scenario())
+    assert [(f["type"], f["tag_id"]) for f in sent] == [("snapshot", 2)]

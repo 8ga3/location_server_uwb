@@ -279,7 +279,7 @@ function renderLiveSummary() {
     ["連続失敗", ind ? String(ind.consecutiveFailures) : "--", ind && ind.consecutiveFailures > 0],
     ["間引き (フレーム)", String(state.live.lostTotal), state.live.lostTotal > 0],
   ]);
-  const ranges = data.rangesNear(data.lastT() ?? 0);
+  const ranges = data.rangesAtIndex(data.fix.t.length - 1);
   const tagZ = tagHeightAt(data, data.fix.t.length - 1);
   renderAnchorTable(
     ["アンカー", "直近 1 秒", "距離"],
@@ -438,8 +438,9 @@ function renderReplaySummary(summary) {
 function renderReplayAnchors() {
   const summary = state.replay.summary;
   const byId = new Map(summary.ranges.map((r) => [r.id, r]));
-  const ranges = data.rangesNear(state.replay.cursorT);
-  const tagZ = tagHeightAt(data, data.indexNear(state.replay.cursorT));
+  const cursor = data.indexNear(state.replay.cursorT);
+  const ranges = data.rangesAtIndex(cursor);
+  const tagZ = tagHeightAt(data, cursor);
   renderAnchorTable(
     ["アンカー", "成功率", "距離", "平均 / 最大 elapsed", "失敗の内訳"],
     data.anchorIds().map((id) => {
