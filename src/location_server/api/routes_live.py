@@ -93,6 +93,10 @@ async def _receive_ops(websocket: WebSocket, hub: LiveHub, subscriber: Subscribe
             hub.unsubscribe(subscriber)
 
 
+# `lost` (この購読で捨てた append の累計) を載せるフレーム。
+# snapshot は購読の起点なので 0 と決まっていて載せない
+LOST_CARRYING_FRAMES = frozenset({"append", "session_start", "session_end", "session_info"})
+
 # 追いつけないクライアントを切るときの close code (RFC 6455 の 1013 Try Again Later)
 CLOSE_TRY_AGAIN_LATER = 1013
 
@@ -116,7 +120,10 @@ async def _send_frames(websocket: WebSocket, subscriber: Subscriber, store: Conf
                 logger.exception("ライブ配信のアンカー座標を読めませんでした")
                 extra = {"anchors_rev": None, "anchors": []}
             frame = {**frame, **extra}
-        elif kind == "append":
+        if kind in LOST_CARRYING_FRAMES:
+            # 捨てた append の累計は、append だけでなくセッションの制御フレームにも載せる。
+            # キューの append がすべて捨てられて制御フレームだけが残った場合も、
+            # ページが欠落に気づけるようにする
             frame = {**frame, "lost": subscriber.lost}
         await websocket.send_text(json.dumps(frame, ensure_ascii=False, separators=(",", ":")))
 

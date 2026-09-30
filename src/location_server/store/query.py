@@ -135,7 +135,7 @@ _U32 = 1 << 32
 def _normalized(table: str, scope: str, partition: str) -> str:
     """`seq_n` / `t_n` (折り返しを展開した seq と t_tag_ms) を足した CTE を作る。
 
-    `scope` は `table` に掛ける WHERE 句、`partition` は展開を独立に行う単位 (セッション、アンカー) である。
+    `scope` は `table` に掛ける WHERE 句、`partition` は展開を独立に行う単位 (セッション) である。
     続けて書く CTE からは `n` という名前で参照する。
     """
     return f"""
@@ -289,17 +289,19 @@ class QueryStore:
         with self._lock:
             rows = self._conn.execute(
                 f"""
-                WITH {
-                    _normalized(
-                        "range_sample",
-                        "session_id = :session_id AND (:anchor_id IS NULL OR anchor_id = :anchor_id)",
-                        "anchor_id",
-                    )
-                },
+                WITH {_normalized("position_fix", "session_id = :session_id", "session_id")},
+                -- 折り返しの展開はセッション共通にし、測位記録で求めた値を seq で測距へ当てる。
+                -- アンカーごとに展開すると、折り返した後に初めて現れたアンカーだけ 2^32 ずれるため。
+                -- 測距行は同じサイクルの測位行と同じトランザクションで書くので、対応する行は必ずある
+                m AS (
+                    SELECT rs.anchor_id, rs.status, rs.distance_mm, rs.elapsed_ms, n.seq_n, n.t_n
+                    FROM range_sample AS rs JOIN n ON n.seq = rs.seq
+                    WHERE rs.session_id = :session_id AND (:anchor_id IS NULL OR rs.anchor_id = :anchor_id)
+                ),
                 r AS (
                     SELECT *, row_number() OVER (PARTITION BY anchor_id ORDER BY seq_n) - 1 AS rn,
                            count(*) OVER (PARTITION BY anchor_id) AS total
-                    FROM n WHERE {_TIME_RANGE}
+                    FROM m WHERE {_TIME_RANGE}
                 ),
                 k AS (SELECT *, {_STRIDE} AS stride FROM r)
                 SELECT * FROM k WHERE rn % stride = 0 OR rn = total - 1 ORDER BY anchor_id, rn

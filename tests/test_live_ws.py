@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import socket
 from pathlib import Path
 from typing import Any
@@ -12,8 +14,10 @@ from starlette.testclient import WebSocketTestSession
 from starlette.websockets import WebSocketDisconnect
 
 from location_server.api import create_app
+from location_server.api.routes_live import _send_frames
 from location_server.ingest.packet import encode_packet
 from location_server.live import LiveHub
+from location_server.live.hub import END_TIMEOUT
 from location_server.settings import Settings
 from telemetry_helpers import make_packet
 
@@ -158,3 +162,36 @@ def test_control_frame_flood_closes_connection(client: TestClient) -> None:
                 ws.receive_json()
     assert excinfo.value.code == 1013
     assert hub.stats.overflow_disconnects == 1
+
+
+def test_lost_is_sent_on_control_frames_when_all_appends_are_dropped() -> None:
+    """キューの append がすべて捨てられても、残った制御フレームで lost が届く。"""
+
+    class FakeWebSocket:
+        def __init__(self) -> None:
+            self.sent: list[dict[str, Any]] = []
+
+        async def send_text(self, text: str) -> None:
+            self.sent.append(json.loads(text))
+
+    async def scenario() -> list[dict[str, Any]]:
+        hub = LiveHub(subscriber_max_frames=2)
+        sub = hub.connect()
+        hub.subscribe(sub, 1)
+        sub.pop_nowait()  # snapshot は送ったものとする
+        hub.publish(make_packet(seq=0))
+        for i in range(1, 5):
+            hub.publish(make_packet(seq=i * 4))
+            hub.tick()
+        sub.push(
+            {"type": "session_end", "session_id": None, "tag_id": 1, "boot_id": 1, "reason": END_TIMEOUT}
+        )
+        ws = FakeWebSocket()
+        task = asyncio.create_task(_send_frames(ws, sub, store=None))  # type: ignore[arg-type]
+        await asyncio.sleep(0.01)
+        task.cancel()
+        return ws.sent
+
+    sent = asyncio.run(scenario())
+    assert [f["type"] for f in sent] == ["session_start", "session_end"]
+    assert sent[-1]["lost"] == 4

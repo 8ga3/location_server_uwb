@@ -303,8 +303,11 @@ function updateLiveStatus() {
 
 function onFrame(frame) {
   if (state.mode !== "live") return;
+  // append 以外のセッションの制御フレームにも lost が載る。append がすべて捨てられた場合もここで気づく
+  if (frame.type !== "snapshot" && typeof frame.lost === "number") noteLost(frame.lost);
   switch (frame.type) {
-    case "snapshot":
+    case "snapshot": {
+      const previousBoot = data.info.boot_id;
       data.clear();
       data.setInfo(frame);
       data.setAnchors(frame.anchors, frame.anchors_rev);
@@ -314,8 +317,14 @@ function onFrame(frame) {
       state.live.resyncPending = false;
       // 最終受信は測定値が届いた時刻だけで数える。snapshot の中身は過去のデータのことがある
       state.live.lastFrameAt = null;
-      state.live.endReason = frame.active || frame.boot_id === null ? null : "ended";
+      // 取り直しの snapshot で同じ終了済みセッションを受けた場合は、先に受けた終了理由を残す
+      if (frame.active || frame.boot_id === null) {
+        state.live.endReason = null;
+      } else if (!(state.live.endReason && frame.boot_id === previousBoot)) {
+        state.live.endReason = "ended";
+      }
       break;
+    }
     case "session_start":
       // 同じ起動のまま戻ってきた場合 (途切れたあとの再開) は軌跡を残す
       if (frame.boot_id !== data.info.boot_id) data.clear();
@@ -328,7 +337,6 @@ function onFrame(frame) {
       if (frame.session_id !== null) data.info.session_id = frame.session_id;
       data.append(frame.fix, frame.ranges);
       if (data.lastT() !== null) data.trimBefore(data.lastT() - TRAIL_MS);
-      noteLost(frame.lost ?? 0);
       if (frame.fix.t.length > 0) state.live.lastFrameAt = performance.now();
       break;
     case "session_end":
