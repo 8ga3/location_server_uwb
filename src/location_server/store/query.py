@@ -114,6 +114,9 @@ class SessionSummary:
 
 
 MAX_POINTS_MIN = 2
+# ranges の全アンカー合計の点数の上限。max_points はアンカーごとの上限なので、anchor_id を省略して
+# 全アンカーを取ると、プロトコル上 255 台まで持てるアンカーの数だけ応答が膨らむ。合計をこの点数に抑える
+RANGES_TOTAL_POINTS_LIMIT = 20_000
 
 
 def stride_for(total: int, max_points: int) -> int:
@@ -126,6 +129,13 @@ def stride_for(total: int, max_points: int) -> int:
     if total <= max_points:
         return 1
     return math.ceil((total - 1) / (max_points - 1))
+
+
+def per_anchor_points(max_points: int, anchors: int) -> int:
+    """全アンカー合計の予算を守るための、1 台あたりの点数の上限。"""
+    if anchors <= 0:
+        return max_points
+    return max(MAX_POINTS_MIN, min(max_points, RANGES_TOTAL_POINTS_LIMIT // anchors))
 
 
 _U31 = 1 << 31
@@ -275,9 +285,12 @@ class QueryStore:
         to_ms: int | None,
         max_points: int,
     ) -> dict[int, Decimated[RangeTable]]:
-        """アンカーごとの測距を時刻順に返す。間引きはアンカーごとに `max_points` 以下へ行う。
+        """アンカーごとの測距を時刻順に返す。間引きはアンカーごとに行う。
 
-        `anchor_id` を省略すると、そのセッションに記録のある全アンカーを返す。
+        `anchor_id` を省略すると、そのセッションに記録のある全アンカーを返す。1 台あたりの点数は
+        `max_points` と、全アンカー合計の予算 (`RANGES_TOTAL_POINTS_LIMIT`) を台数で割った値の小さいほう
+        (最低 `MAX_POINTS_MIN`) とする。実際の台数 (10 台まで) なら `max_points` がそのまま使われ、
+        `track` と同じ位置で間引かれる。
         """
         params = {
             "session_id": session_id,
@@ -287,6 +300,14 @@ class QueryStore:
             "max_points": max_points,
         }
         with self._lock:
+            anchors: int = self._conn.execute(
+                """
+                SELECT count(DISTINCT anchor_id) FROM range_sample
+                WHERE session_id = :session_id AND (:anchor_id IS NULL OR anchor_id = :anchor_id)
+                """,
+                params,
+            ).fetchone()[0]
+            params["max_points"] = per_anchor_points(max_points, anchors)
             rows = self._conn.execute(
                 f"""
                 WITH {_normalized("position_fix", "session_id = :session_id", "session_id")},

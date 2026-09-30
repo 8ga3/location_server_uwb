@@ -9,7 +9,8 @@ from fastapi.testclient import TestClient
 
 from location_server.ingest.packet import CycleRecord, RangeRecord, TelemetryPacket
 from location_server.store import QueryStore, ReceivedPacket, TelemetryStore
-from location_server.store.query import stride_for
+from location_server.store import query as query_module
+from location_server.store.query import per_anchor_points, stride_for
 from telemetry_helpers import ANCHORS, make_packet
 
 RECV_AT = "2026-09-30T00:00:00+00:00"
@@ -278,3 +279,27 @@ def test_anchor_first_seen_after_wrap_uses_session_unwrap(client: TestClient) ->
     assert ranges["0x0104"]["seq"] == fix["seq"][2:] == [2**32, 2**32 + 1]
     assert ranges["0x0104"]["t"] == fix["t"][2:] == [start + 100, start + 150]
     assert ranges["0x0100"]["seq"] == fix["seq"]
+
+
+def test_per_anchor_points() -> None:
+    assert per_anchor_points(2000, 4) == 2000
+    assert per_anchor_points(20_000, 4) == 5000
+    assert per_anchor_points(20_000, 255) == 78
+    assert per_anchor_points(20_000, 20_000) == 2
+    assert per_anchor_points(2000, 0) == 2000
+
+
+def test_ranges_total_points_are_limited(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """全アンカーを取ると、合計の点数が予算に収まるよう 1 台あたりの点数を減らす。"""
+    monkeypatch.setattr(query_module, "RANGES_TOTAL_POINTS_LIMIT", 12)
+    telemetry: TelemetryStore = client.app.state.telemetry_store  # type: ignore[attr-defined]
+    session_id = _write(telemetry, make_packet(seq=0, count=16))
+    payload = client.get(f"/api/v1/sessions/{session_id}/ranges", params={"max_points": 100}).json()
+    # アンカー 4 台で予算 12 点 → 1 台 3 点まで
+    assert all(len(columns["t"]) <= 3 for columns in payload["ranges"].values())
+    assert sum(len(columns["t"]) for columns in payload["ranges"].values()) <= 12
+    # 1 台だけを指定すれば予算を丸ごと使える
+    one = client.get(
+        f"/api/v1/sessions/{session_id}/ranges", params={"max_points": 100, "anchor_id": "0x0100"}
+    ).json()
+    assert 3 < len(one["ranges"]["0x0100"]["t"]) <= 12
