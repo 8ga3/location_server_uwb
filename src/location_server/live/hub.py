@@ -402,6 +402,9 @@ class LiveHub:
         クライアントにアンカー座標を取り直させる。
         """
         key = (tag_id, boot_id)
+        # 呼び出し側は DB に残った値を渡すが、念のためここでも省略 (None) で既知の値を消さない
+        if config_rev is None and key in self._hello:
+            config_rev = self._hello[key][1]
         self._hello[key] = (session_id, config_rev)
         self._hello.move_to_end(key)
         while len(self._hello) > HELLO_MEMORY:

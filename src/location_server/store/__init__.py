@@ -2,12 +2,13 @@
 
 from location_server.store.anchors import AnchorNotFoundError, AnchorUpdate, ConfigStore
 from location_server.store.query import QueryStore
-from location_server.store.telemetry import ReceivedPacket, TelemetryStore, WriteResult
+from location_server.store.telemetry import HelloResult, ReceivedPacket, TelemetryStore, WriteResult
 
 __all__ = [
     "AnchorNotFoundError",
     "AnchorUpdate",
     "ConfigStore",
+    "HelloResult",
     "QueryStore",
     "ReceivedPacket",
     "TelemetryStore",

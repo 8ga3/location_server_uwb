@@ -126,7 +126,7 @@ def test_last_seen_advances_but_started_at_stays(conn: sqlite3.Connection, telem
 def test_hello_then_udp_share_session(conn: sqlite3.Connection, telemetry: TelemetryStore) -> None:
     session_id = telemetry.hello(
         tag_id=1, boot_id=0xAAAAAAAA, fw_version="0.1.0-dev", config_rev=7, now="2026-09-27T00:00:00+00:00"
-    )
+    ).session_id
     result = telemetry.write_packets([_received(make_packet())])
     assert result.sessions[(1, 0xAAAAAAAA)] == session_id
     session = conn.execute("SELECT * FROM session").fetchone()
@@ -137,7 +137,7 @@ def test_udp_then_hello_fills_session(conn: sqlite3.Connection, telemetry: Telem
     result = telemetry.write_packets([_received(make_packet(), "2026-09-27T00:00:05+00:00")])
     session_id = telemetry.hello(
         tag_id=1, boot_id=0xAAAAAAAA, fw_version="0.1.0-dev", config_rev=3, now="2026-09-27T00:00:06+00:00"
-    )
+    ).session_id
     assert session_id == result.sessions[(1, 0xAAAAAAAA)]
     session = conn.execute("SELECT * FROM session").fetchone()
     assert (session["fw_version"], session["config_rev"]) == ("0.1.0-dev", 3)
@@ -168,7 +168,7 @@ def test_session_ids_stay_consecutive(conn: sqlite3.Connection, telemetry: Telem
     )
     second = telemetry.hello(
         tag_id=1, boot_id=2, fw_version="0.1.0-dev", config_rev=1, now="2026-09-27T00:00:10+00:00"
-    )
+    ).session_id
     third = telemetry.write_packets([_received(make_packet(boot_id=3))]).sessions[(1, 3)]
     assert (first, second, third) == (1, 2, 3)
 
@@ -201,7 +201,11 @@ def test_hello_keeps_values_omitted_in_resend(conn: sqlite3.Connection, telemetr
     telemetry.hello(
         tag_id=1, boot_id=1, fw_version="0.1.0-dev", config_rev=7, now="2026-09-27T00:00:00+00:00"
     )
-    telemetry.hello(tag_id=1, boot_id=1, fw_version=None, config_rev=None, now="2026-09-27T00:00:01+00:00")
+    resent = telemetry.hello(
+        tag_id=1, boot_id=1, fw_version=None, config_rev=None, now="2026-09-27T00:00:01+00:00"
+    )
+    # 省略した config_rev は既存の値が残り、その値を返す (ライブ配信にも同じ値を渡すため)
+    assert resent.config_rev == 7
     session = conn.execute("SELECT fw_version, config_rev FROM session").fetchone()
     assert (session["fw_version"], session["config_rev"]) == ("0.1.0-dev", 7)
 

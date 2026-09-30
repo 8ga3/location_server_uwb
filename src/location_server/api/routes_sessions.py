@@ -60,7 +60,7 @@ async def post_hello(request: Request, body: HelloIn) -> HelloOut:
     DB への書き込みはスレッドで行い、決まったセッション ID と構成リビジョンをライブ配信へ伝える。
     ライブ配信は DB に触れないので、ここで教えないと UDP の受信だけでは構成リビジョンがわからない。
     """
-    session_id = await asyncio.to_thread(
+    result = await asyncio.to_thread(
         get_telemetry_store(request).hello,
         tag_id=body.tag_id,
         boot_id=body.boot_id,
@@ -68,8 +68,9 @@ async def post_hello(request: Request, body: HelloIn) -> HelloOut:
         config_rev=body.config_rev,
         now=utc_now_text(),
     )
-    get_live_hub(request).note_hello(body.tag_id, body.boot_id, session_id, body.config_rev)
-    return HelloOut(session_id=session_id)
+    # 本文で省略された config_rev は DB が既存の値を残すので、ライブ配信にも残した後の値を渡す
+    get_live_hub(request).note_hello(body.tag_id, body.boot_id, result.session_id, result.config_rev)
+    return HelloOut(session_id=result.session_id)
 
 
 @router.get("/sessions", response_model=SessionListOut)
