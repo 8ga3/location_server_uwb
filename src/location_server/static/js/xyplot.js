@@ -209,13 +209,18 @@ export class XYPlot {
     ctx.globalAlpha = 1;
   }
 
-  // 軌跡。古い点ほど青く薄く、新しい点ほど赤く濃く描く。表示範囲外の点の数を返す
+  // 軌跡。古い点ほど青く薄く、新しい点ほど赤く濃く描く。表示範囲外の点の数を返す。
+  // 軌跡は一本につなげて描く。ただし実測でつながっていない区間、つまり UDP の欠測 (dt が null) や
+  // 測位の失敗をまたぐ区間は点線にして、実在する移動経路と見分けられるようにする。
+  // 表示範囲外の点 (発散した解) の前後だけは線を切る。画面の外へ向かう長い線で軌跡が見えなくなるため
   _trail(view, frame, from, to, colors) {
     const { ctx } = this;
     const fix = view.data.fix;
     const count = to - from;
     let outside = 0;
     let prev = null;
+    // 直前に描いた点から今の点までの間に、測位の失敗を挟んだか
+    let bridged = false;
     let good = view.data.lastGoodBefore(from - 1);
     ctx.lineWidth = 1.5;
     for (let i = from; i <= to; i++) {
@@ -233,7 +238,7 @@ export class XYPlot {
           ctx.lineTo(px - 4, py + 4);
           ctx.stroke();
         }
-        prev = null;
+        bridged = true;
         continue;
       }
       good = i;
@@ -242,18 +247,23 @@ export class XYPlot {
       if (!frame.inView(x, y)) {
         outside++;
         prev = null;
+        bridged = false;
         continue;
       }
       const px = frame.toX(x);
       const py = frame.toY(y);
       const color = trailColor(ratio, 0.25 + 0.75 * ratio);
       if (prev) {
+        const gap = bridged || fix.dt[i] === null;
         ctx.strokeStyle = color;
+        ctx.setLineDash(gap ? [4, 4] : []);
         ctx.beginPath();
         ctx.moveTo(prev[0], prev[1]);
         ctx.lineTo(px, py);
         ctx.stroke();
+        ctx.setLineDash([]);
       }
+      bridged = false;
       ctx.fillStyle = color;
       ctx.fillRect(px - 1.5, py - 1.5, 3, 3);
       prev = [px, py];
