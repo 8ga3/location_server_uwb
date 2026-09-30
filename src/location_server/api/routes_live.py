@@ -117,12 +117,18 @@ async def _send_frames(websocket: WebSocket, subscriber: Subscriber, store: Conf
             return
         kind = frame["type"]
         if kind in ANCHOR_CARRYING_FRAMES:
+            generation = subscriber.generation
             try:
                 extra = await asyncio.to_thread(_anchors_for, store, frame.get("config_rev"))
             except Exception:
                 # 座標が引けなくても計測値の配信は止めない。ページ側は座標なしで描く
                 logger.exception("ライブ配信のアンカー座標を読めませんでした")
                 extra = {"anchors_rev": None, "anchors": []}
+            if subscriber.generation != generation:
+                # DB を待っている間に購読が切り替わった (別のタグ、購読解除、取り直し)。
+                # 古い購読のフレームを送るとページが解除済みの状態へ戻るので捨てる。
+                # 新しい購読のフレームはキューに積まれていて、この後に送られる
+                continue
             frame = {**frame, **extra}
         if kind in LOST_CARRYING_FRAMES:
             # 捨てた append の累計は、append だけでなくセッションの制御フレームにも載せる。

@@ -148,12 +148,18 @@ export class SessionData {
     return nearestIndex(this.fix.t, t);
   }
 
-  // 時刻 t に最も近い測距をアンカーごとに返す
-  rangesNear(t) {
+  // fix の index 番目のサイクルと同じ seq の測距をアンカーごとに返す。
+  // そのサイクルに測距が無いアンカーは含めない (欠測)。時刻の近い別のサイクルの測距で代用すると、
+  // アンカーの構成が変わった後などに古い距離を現在値として表と測距円に出してしまうため
+  rangesAtIndex(index) {
     const result = new Map();
+    if (index < 0 || index >= this.fix.seq.length) return result;
+    const seq = this.fix.seq[index];
     for (const [id, columns] of this.ranges) {
-      const i = nearestIndex(columns.t, t);
-      if (i >= 0) result.set(id, { t: columns.t[i], seq: columns.seq[i], d: columns.d[i], st: columns.st[i], el: columns.el[i] });
+      const i = lastIndexAtOrBefore(columns.seq, seq);
+      if (i >= 0 && columns.seq[i] === seq) {
+        result.set(id, { t: columns.t[i], seq, d: columns.d[i], st: columns.st[i], el: columns.el[i] });
+      }
     }
     return result;
   }
