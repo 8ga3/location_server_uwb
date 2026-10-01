@@ -111,6 +111,13 @@ class SessionSummary:
     used_min: int | None
     used_max: int | None
     anchors: tuple[AnchorStats, ...]
+    # タグ側のカルマンフィルタの集計。`kf_predicted_cycles` はフィルタが有効で、観測による更新が
+    # 無かった (予測のみの) サイクル数。`kf_sigma_mean_mm` はフィルタが有効なサイクルの標準偏差の平均
+    kf_ok_cycles: int
+    kf_predicted_cycles: int
+    kf_init_count: int
+    kf_rejected_ranges: int
+    kf_sigma_mean_mm: float | None
 
 
 MAX_POINTS_MIN = 2
@@ -271,6 +278,15 @@ class QueryStore:
                 z_mm=row["z_mm"],
                 used=row["used_count"],
                 resid_mm=row["residual_mm"],
+                kf_ok=bool(row["kf_ok"]),
+                kf_updated=bool(row["kf_updated"]),
+                kf_init=bool(row["kf_init"]),
+                kf_x_mm=row["kf_x_mm"],
+                kf_y_mm=row["kf_y_mm"],
+                kf_z_mm=row["kf_z_mm"],
+                kf_sigma_mm=row["kf_sigma_mm"],
+                kf_used=row["kf_used"],
+                kf_rejected=row["kf_rejected"],
             )
         if not rows:
             return Decimated(total=0, stride=1, data=fix)
@@ -347,7 +363,7 @@ class QueryStore:
         return result
 
     def summary(self, session_id: int) -> SessionSummary | None:
-        """セッション単位の成功率・欠測率・残差 RMS・周期と、アンカーごとの測距の集計を返す。"""
+        """セッションの成功率・欠測率・残差 RMS・周期・フィルタの集計と、アンカーごとの測距の集計を返す。"""
         with self._lock:
             info = self._get_session(session_id)
             if info is None:
@@ -355,7 +371,12 @@ class QueryStore:
             fix_row = self._conn.execute(
                 """
                 SELECT avg(CASE WHEN ok THEN residual_mm * residual_mm END) AS resid_ms,
-                       min(used_count) AS used_min, max(used_count) AS used_max
+                       min(used_count) AS used_min, max(used_count) AS used_max,
+                       coalesce(sum(kf_ok), 0) AS kf_ok_cycles,
+                       coalesce(sum(kf_ok AND NOT kf_updated), 0) AS kf_predicted,
+                       coalesce(sum(kf_ok AND kf_init), 0) AS kf_init,
+                       coalesce(sum(kf_rejected), 0) AS kf_rejected,
+                       avg(CASE WHEN kf_ok THEN kf_sigma_mm END) AS kf_sigma_mean
                 FROM position_fix WHERE session_id = ?
                 """,
                 (session_id,),
@@ -403,6 +424,11 @@ class QueryStore:
             used_min=fix_row["used_min"],
             used_max=fix_row["used_max"],
             anchors=tuple(anchors[aid] for aid in sorted(anchors)),
+            kf_ok_cycles=fix_row["kf_ok_cycles"],
+            kf_predicted_cycles=fix_row["kf_predicted"],
+            kf_init_count=fix_row["kf_init"],
+            kf_rejected_ranges=fix_row["kf_rejected"],
+            kf_sigma_mean_mm=fix_row["kf_sigma_mean"],
         )
 
     def _get_session(self, session_id: int) -> SessionInfo | None:

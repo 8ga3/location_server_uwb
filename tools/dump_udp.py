@@ -19,12 +19,16 @@
 from __future__ import annotations
 
 import argparse
+import math
 import random
 import socket
 import sys
 import time
 
 from location_server.ingest.packet import (
+    FIX_FLAG_KF_INIT,
+    FIX_FLAG_KF_OK,
+    FIX_FLAG_KF_UPDATED,
     FIX_FLAG_OK,
     CycleRecord,
     PacketDecodeError,
@@ -38,6 +42,12 @@ from location_server.settings import DEFAULT_UDP_PORT
 # UDP データグラムの最大長。形式上有効な最大のパケット (count=16, anchor_n=255) は 32,920 バイトあり、
 # それより小さいバッファでは recvfrom() が末尾を切り捨て、有効なパケットを length_mismatch と誤表示する
 RECV_BUFFER = 65535
+
+# 擬似送信でタグを動かす円軌道。中心 [mm]、半径 [mm]、1 周の時間 [ms]
+FAKE_CENTER_MM = (2500, 2000)
+FAKE_RADIUS_MM = 1500
+FAKE_LAP_MS = 20_000
+FAKE_TAG_Z_MM = 1000
 
 
 def format_cycle(packet: TelemetryPacket, cycle: CycleRecord) -> str:
@@ -58,6 +68,20 @@ def format_cycle(packet: TelemetryPacket, cycle: CycleRecord) -> str:
             f"resid_mm={cycle.residual_mm}",
         ]
     fields.append(f"used={cycle.used_count}")
+    # フィルタの状態はファームウェアの POS_KF 行と同じ呼び方 (NONE / UPDATE / PREDICT) にする
+    if not cycle.kf_ok:
+        fields.append("kf=NONE")
+    else:
+        fields += [
+            f"kf={'UPDATE' if cycle.kf_updated else 'PREDICT'}",
+            f"kf_x_mm={cycle.kf_x_mm}",
+            f"kf_y_mm={cycle.kf_y_mm}",
+            f"kf_z_mm={cycle.kf_z_mm}",
+            f"kf_sigma_mm={cycle.kf_sigma_mm}",
+        ]
+        if cycle.kf_init:
+            fields.append("kf_init=1")
+    fields += [f"kf_used={cycle.kf_used}", f"kf_rejected={cycle.kf_rejected}"]
     for r in cycle.ranges:
         value = f"{r.distance_mm}mm" if r.ok else f"err{r.status}"
         fields.append(f"0x{r.anchor_id:04X}={value}/{r.elapsed_ms}ms")
@@ -93,10 +117,18 @@ def listen(host: str, port: int) -> int:
 
 
 def _fake_cycle(seq: int, t_ms: int, anchors: list[int], rng: random.Random) -> CycleRecord:
-    """それらしい値を持つ擬似サイクル。1 割の確率で測距を失敗させる。"""
+    """それらしい値を持つ擬似サイクル。
+
+    タグは円軌道を一定の速さで回るものとし、最小二乗の解は真の位置に数十 mm のばらつきを、
+    フィルタの位置はそれより小さいばらつきを持たせる。1 割の確率で測距を失敗させる。
+    5% の確率で全アンカーの測距が失敗したサイクルにし、最小二乗は解けず、フィルタは予測だけで進んだ
+    ことにする。先頭のサイクル (`seq = 0`) では最小二乗の解からフィルタを初期化したことにする。
+    """
+    init = seq == 0
+    predict_only = not init and rng.random() < 0.05
     ranges = []
     for anchor_id in anchors:
-        if rng.random() < 0.1:
+        if predict_only or rng.random() < 0.1:
             ranges.append(RangeRecord(anchor_id, status=11, elapsed_ms=rng.randint(4, 8), distance_mm=0))
         else:
             ranges.append(
@@ -104,15 +136,46 @@ def _fake_cycle(seq: int, t_ms: int, anchors: list[int], rng: random.Random) -> 
                     anchor_id, status=0, elapsed_ms=rng.randint(4, 8), distance_mm=rng.randint(500, 6000)
                 )
             )
+    used = sum(r.ok for r in ranges)
+    angle = 2 * math.pi * (t_ms % FAKE_LAP_MS) / FAKE_LAP_MS
+    true_x = FAKE_CENTER_MM[0] + FAKE_RADIUS_MM * math.cos(angle)
+    true_y = FAKE_CENTER_MM[1] + FAKE_RADIUS_MM * math.sin(angle)
+    ls_x = round(true_x + rng.gauss(0, 60))
+    ls_y = round(true_y + rng.gauss(0, 60))
+
+    fix_flags = FIX_FLAG_KF_OK
+    if predict_only:
+        kf_used = 0
+        kf_rejected = 0
+        kf_sigma = rng.randint(60, 120)
+    else:
+        fix_flags |= FIX_FLAG_OK | FIX_FLAG_KF_UPDATED
+        # 取り込めた測距のうち、たまに 1 本をゲートで棄却する
+        kf_rejected = 1 if not init and used > 0 and rng.random() < 0.05 else 0
+        kf_used = used - kf_rejected
+        kf_sigma = rng.randint(150, 250) if init else rng.randint(20, 60)
+    if init:
+        fix_flags |= FIX_FLAG_KF_INIT
+        kf_x, kf_y = ls_x, ls_y
+    else:
+        kf_x = round(true_x + rng.gauss(0, 25))
+        kf_y = round(true_y + rng.gauss(0, 25))
     return CycleRecord(
         seq=seq,
         t_tag_ms=t_ms,
-        fix_flags=FIX_FLAG_OK,
-        used_count=sum(r.ok for r in ranges),
-        x_mm=rng.randint(0, 5000),
-        y_mm=rng.randint(0, 4000),
-        z_mm=1000,
-        residual_mm=rng.randint(10, 80),
+        fix_flags=fix_flags,
+        used_count=used,
+        # 最小二乗が解けなかったサイクルは、タグと同じく座標欄を 0 のまま送る
+        x_mm=0 if predict_only else ls_x,
+        y_mm=0 if predict_only else ls_y,
+        z_mm=FAKE_TAG_Z_MM,
+        residual_mm=0 if predict_only else rng.randint(10, 80),
+        kf_x_mm=kf_x,
+        kf_y_mm=kf_y,
+        kf_z_mm=FAKE_TAG_Z_MM,
+        kf_sigma_mm=kf_sigma,
+        kf_used=kf_used,
+        kf_rejected=kf_rejected,
         ranges=tuple(ranges),
     )
 

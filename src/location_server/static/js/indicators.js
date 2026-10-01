@@ -1,6 +1,7 @@
 // ライブ表示の指標 (設計文書 8.3)。直近 1 秒の測位レートと欠測率、アンカーごとの成功率、
-// 測位失敗の連続回数を、手元に溜めたデータから計算する。時間の基準はタグの millis() で、
-// 最後に受けたサイクルから遡って 1 秒を見る。
+// 測位失敗の連続回数、フィルタの集計を、手元に溜めたデータから計算する。時間の基準はタグの millis() で、
+// 最後に受けたサイクルから遡って 1 秒を見る。フィルタの集計は再生のサマリ (サーバーが返す kf_*) と
+// 同じ数え方で、範囲だけを直近 1 秒に絞る。
 
 import { lastIndexAtOrBefore } from "./model.js";
 
@@ -30,6 +31,25 @@ export function liveIndicators(data, windowMs = WINDOW_MS) {
   let consecutiveFailures = 0;
   for (let i = n - 1; i >= 0 && !fix.ok[i]; i--) consecutiveFailures++;
 
+  // フィルタ: 有効なサイクル、そのうち予測だけのサイクル、初期化、棄却した測距、σ の平均
+  let kfOk = 0;
+  let kfPredicted = 0;
+  let kfInit = 0;
+  let kfRejected = 0;
+  let sigmaSum = 0;
+  let sigmaCount = 0;
+  for (let i = first; i < n; i++) {
+    kfRejected += fix.krej[i] ?? 0;
+    if (!fix.kok[i]) continue;
+    kfOk++;
+    if (!fix.kupd[i]) kfPredicted++;
+    if (fix.kinit[i]) kfInit++;
+    if (fix.ksig[i] !== null && fix.ksig[i] !== undefined) {
+      sigmaSum += fix.ksig[i];
+      sigmaCount++;
+    }
+  }
+
   const anchors = new Map();
   for (const [id, columns] of data.ranges) {
     const from = lastIndexAtOrBefore(columns.t, tStart) + 1;
@@ -49,6 +69,11 @@ export function liveIndicators(data, windowMs = WINDOW_MS) {
     lossRate: expected > 0 ? missing / expected : null,
     missing,
     consecutiveFailures,
+    kfRate: cycles > 0 ? kfOk / cycles : null,
+    kfPredicted,
+    kfInit,
+    kfRejected,
+    kfSigmaMean: sigmaCount > 0 ? sigmaSum / sigmaCount : null,
     anchors,
   };
 }

@@ -130,12 +130,26 @@ function renderAnchorTable(headers, rows) {
   );
 }
 
+// フィルタの状態の表示と、強調するかどうか。初期化したサイクルは観測でも更新しているので初期化を優先する
+function filterState(fix, index) {
+  if (!fix.kok[index]) return ["無効", true];
+  if (fix.kinit[index]) return ["初期化", false];
+  if (fix.kupd[index]) return ["観測で更新", false];
+  return ["予測のみ", true];
+}
+
+function mm(meters, digits = 0) {
+  return num(meters === null || meters === undefined ? null : meters * 1000, digits, " mm");
+}
+
 function renderCursorInfo(index) {
   const fix = data.fix;
   if (index < 0 || index >= fix.t.length) {
     renderStats($("cursor-info"), [["時刻", "--"]]);
     return;
   }
+  const [kfText, kfBad] = filterState(fix, index);
+  const count = (v) => (v === null || v === undefined ? "--" : String(v));
   renderStats($("cursor-info"), [
     ["タグ時刻", num(fix.t[index] / 1000, 3, " s")],
     ["seq", String(fix.seq[index])],
@@ -143,7 +157,12 @@ function renderCursorInfo(index) {
     ["X", num(fix.x[index], 3, " m")],
     ["Y", num(fix.y[index], 3, " m")],
     ["使用数", num(fix.used[index])],
-    ["残差", num(fix.resid[index] === null ? null : fix.resid[index] * 1000, 0, " mm")],
+    ["残差", mm(fix.resid[index])],
+    ["フィルタ", kfText, kfBad],
+    ["フィルタ X", num(fix.kx[index], 3, " m")],
+    ["フィルタ Y", num(fix.ky[index], 3, " m")],
+    ["σ", mm(fix.ksig[index])],
+    ["取り込み / 棄却", `${count(fix.kused[index])} / ${count(fix.krej[index])}`],
   ]);
 }
 
@@ -164,6 +183,11 @@ function rangeCell(ranges, id, tagZ) {
 }
 
 // ------------------------------------------------------------------ 描画
+
+// XY 平面に描く軌跡の選択 (最小二乗 / フィルタ)
+function trailToggles() {
+  return { showLS: $("show-ls").checked, showFilter: $("show-filter").checked };
+}
 
 function refreshAnchors() {
   const ids = data.anchorIds();
@@ -186,6 +210,7 @@ function render(now) {
       cursorIndex: n - 1,
       ended: !data.info.active,
       fitTrail: $("fit-trail").checked,
+      ...trailToggles(),
     });
     // 受信し始めてから 30 秒たつまでは、横軸を最初のサイクルから始める
     const first = data.firstT();
@@ -199,7 +224,16 @@ function render(now) {
   const replay = state.replay;
   if (!replay) {
     // 読み込み中 (または失敗)。空のデータで描き、前の表示を残さない
-    xy.render({ data, colors: state.colors, fromIndex: 0, toIndex: -1, cursorIndex: -1, ended: true, fitTrail: false });
+    xy.render({
+      data,
+      colors: state.colors,
+      fromIndex: 0,
+      toIndex: -1,
+      cursorIndex: -1,
+      ended: true,
+      fitTrail: false,
+      ...trailToggles(),
+    });
     charts.update(data, null, null);
     charts.setCursor(null);
     return;
@@ -214,6 +248,7 @@ function render(now) {
     cursorIndex: cursor,
     ended: true,
     fitTrail: $("fit-trail").checked,
+    ...trailToggles(),
   });
   if (replay.chartsDirty) {
     charts.update(data, replay.windowMin, replay.windowMax);
@@ -279,6 +314,11 @@ function renderLiveSummary() {
       ? ["欠測率 (1 秒)", "-- (再同期中)"]
       : ["欠測率 (1 秒)", ind ? pct(ind.lossRate) : "--", ind && ind.missing > 0],
     ["連続失敗", ind ? String(ind.consecutiveFailures) : "--", ind && ind.consecutiveFailures > 0],
+    ["フィルタ有効率 (1 秒)", ind ? pct(ind.kfRate) : "--"],
+    ["予測のみ (1 秒)", ind ? String(ind.kfPredicted) : "--"],
+    ["初期化 (1 秒)", ind ? String(ind.kfInit) : "--"],
+    ["棄却した測距 (1 秒)", ind ? String(ind.kfRejected) : "--"],
+    ["σ 平均 (1 秒)", ind ? mm(ind.kfSigmaMean, 1) : "--"],
     ["間引き (フレーム)", String(state.live.lostTotal), state.live.lostTotal > 0],
   ]);
   const ranges = data.rangesAtIndex(data.fix.t.length - 1);
@@ -434,6 +474,11 @@ function renderReplaySummary(summary) {
     ["平均周期", num(summary.period_mean_ms, 1, " ms")],
     ["最大周期", num(summary.period_max_ms, 0, " ms")],
     ["使用数", summary.used_min === null ? "--" : `${summary.used_min}..${summary.used_max}`],
+    ["フィルタ有効率", pct(s.cycles > 0 ? summary.kf_ok_cycles / s.cycles : null)],
+    ["予測のみの周期", String(summary.kf_predicted_cycles)],
+    ["初期化回数", String(summary.kf_init_count)],
+    ["棄却した測距", String(summary.kf_rejected_ranges)],
+    ["σ 平均", mm(summary.kf_sigma_mean, 1)],
     ["間引き", decimation ? `1/${decimation.track.stride}` : "--", decimation && decimation.track.stride > 1],
   ]);
 }
@@ -713,9 +758,11 @@ $("pause").addEventListener("click", () => {
   updateLiveStatus();
 });
 
-$("fit-trail").addEventListener("change", () => {
-  state.dirty = true;
-});
+for (const id of ["fit-trail", "show-ls", "show-filter"]) {
+  $(id).addEventListener("change", () => {
+    state.dirty = true;
+  });
+}
 
 $("slider").addEventListener("input", (event) => {
   if (!state.replay) return;

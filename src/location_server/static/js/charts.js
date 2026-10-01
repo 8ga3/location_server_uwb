@@ -1,4 +1,5 @@
-// 時系列グラフ (uPlot)。距離 (アンカーごと)、周期時間、残差と使用アンカー数の 3 枚を縦に並べる。
+// 時系列グラフ (uPlot)。距離 (アンカーごと)、周期時間、測位の品質 (残差・使用アンカー数・フィルタの σ と
+// 棄却数) の 3 枚を縦に並べる。
 // 横軸はタグの millis() を秒にしたもの。測距の失敗は null として線を切り、欠測として見せる。
 // uPlot は index.html で読み込む同梱ファイルが定義するグローバル変数を使う。
 
@@ -59,7 +60,8 @@ export class TimeCharts {
     }
     // 周期はサーバーが間引く前に求めた値 (dt) を使う。間引いた再生データでも本来の周期が見える
     const periodData = [xs, fix.dt];
-    const qualityData = [xs, fix.resid.map((r) => (r === null ? null : r * 1000)), fix.used];
+    const toMm = (v) => (v === null || v === undefined ? null : v * 1000);
+    const qualityData = [xs, fix.resid.map(toMm), fix.used, fix.ksig.map(toMm), fix.krej];
 
     this._programmatic++;
     try {
@@ -200,7 +202,7 @@ export class TimeCharts {
 
     const quality = new uPlot(
       base(
-        "残差と使用アンカー数",
+        "残差・使用数・フィルタの σ",
         HEIGHT_SMALL,
         [
           { label: "t [s]" },
@@ -214,11 +216,27 @@ export class TimeCharts {
             points: { show: false },
             paths: uPlot.paths.stepped({ align: 1 }),
           },
+          {
+            label: "フィルタ σ [mm]",
+            stroke: cssVar("--filter"),
+            width: 1.5,
+            spanGaps: false,
+            points: { show: false },
+          },
+          {
+            label: "棄却数",
+            scale: "n",
+            stroke: cssVar("--bad"),
+            width: 1,
+            spanGaps: false,
+            points: { show: false },
+            paths: uPlot.paths.stepped({ align: 1 }),
+          },
         ],
-        [xAxis, axis("[mm]"), axis("使用数", { side: 1, scale: "n", incrs: [1, 2, 5], grid: { show: false } })],
+        [xAxis, axis("[mm]"), axis("本数", { side: 1, scale: "n", incrs: [1, 2, 5], grid: { show: false } })],
         { n: { range: (u, min, max) => [0, Math.max(4, max ?? 4) + 0.5] } },
       ),
-      [[], [], []],
+      [[], [], [], [], []],
       this.el.quality,
     );
 

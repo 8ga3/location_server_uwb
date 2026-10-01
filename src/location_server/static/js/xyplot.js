@@ -1,4 +1,5 @@
 // XY 平面の描画 (Canvas)。アンカー位置、軌跡 (時刻で色付け)、選択時刻の測距円、測位失敗点の × を描く。
+// タグ側のカルマンフィルタの軌跡は、最小二乗の軌跡に単色 (--filter) で重ねる。
 // 座標系はアンカー 0 を原点とする右手系で、+Y を画面の上に取る。X と Y の縮尺は揃える。
 
 import { cssVar, trailColor } from "./colors.js";
@@ -51,8 +52,9 @@ export class XYPlot {
     this.ctx = canvas.getContext("2d");
   }
 
-  // view: { data, colors, fromIndex, toIndex, cursorIndex, ended, fitTrail }
-  // fromIndex..toIndex (両端を含む) の fix を軌跡として描き、cursorIndex を現在位置とする
+  // view: { data, colors, fromIndex, toIndex, cursorIndex, ended, fitTrail, showLS, showFilter }
+  // fromIndex..toIndex (両端を含む) の fix を軌跡として描き、cursorIndex を現在位置とする。
+  // showLS / showFilter は最小二乗とフィルタの軌跡・マーカーをそれぞれ描くかどうか (省略時は描く)
   render(view) {
     const { canvas, ctx } = this;
     const dpr = window.devicePixelRatio || 1;
@@ -73,20 +75,26 @@ export class XYPlot {
       marker: cssVar("--marker"),
       ended: cssVar("--ended"),
       bad: cssVar("--bad"),
+      filter: cssVar("--filter"),
+      panel: cssVar("--panel"),
     };
     const { data } = view;
     const fix = data.fix;
     const from = Math.max(0, view.fromIndex);
     const to = Math.min(fix.t.length - 1, view.toIndex);
+    const showLS = view.showLS ?? true;
+    const showFilter = view.showFilter ?? true;
 
-    const frame = this._frame(view, from, to, width, height);
+    const frame = this._frame(view, from, to, width, height, showLS, showFilter);
     this._grid(frame, colors, width, height);
 
     const cursor = view.cursorIndex;
     if (cursor >= 0 && cursor < fix.t.length) this._circles(view, frame, cursor);
-    const outside = this._trail(view, frame, from, to, colors);
+    let outside = 0;
+    if (showLS) outside += this._trail(view, frame, from, to, colors);
+    if (showFilter) outside += this._filterTrail(view, frame, from, to, colors);
     this._anchors(view, frame, colors);
-    if (cursor >= 0 && cursor < fix.t.length) this._marker(view, frame, cursor, colors);
+    if (cursor >= 0 && cursor < fix.t.length) this._markers(view, frame, cursor, colors, showLS, showFilter);
 
     if (outside > 0) {
       ctx.fillStyle = colors.bad;
@@ -97,8 +105,8 @@ export class XYPlot {
     }
   }
 
-  // 表示範囲を決め、ワールド座標 (m) から画面座標への変換を返す
-  _frame(view, from, to, width, height) {
+  // 表示範囲を決め、ワールド座標 (m) から画面座標への変換を返す。表示している軌跡の点だけを範囲に含める
+  _frame(view, from, to, width, height, showLS, showFilter) {
     const { data } = view;
     const anchorsBox = emptyBox();
     for (const a of data.anchors) extend(anchorsBox, a.x, a.y);
@@ -116,12 +124,15 @@ export class XYPlot {
       };
     }
     const fix = data.fix;
-    for (let i = from; i <= to; i++) {
-      const x = fix.x[i];
-      const y = fix.y[i];
-      if (x === null || y === null) continue;
-      if (limit && (x < limit.minX || x > limit.maxX || y < limit.minY || y > limit.maxY)) continue;
+    const include = (x, y) => {
+      if (x === null || y === null || x === undefined || y === undefined) return;
+      if (limit && (x < limit.minX || x > limit.maxX || y < limit.minY || y > limit.maxY)) return;
       extend(box, x, y);
+    };
+    for (let i = from; i <= to; i++) {
+      if (showLS) include(fix.x[i], fix.y[i]);
+      // フィルタの位置は最小二乗の成否と関係なく、kok が真のサイクルだけ値を持つ
+      if (showFilter && fix.kok[i]) include(fix.kx[i], fix.ky[i]);
     }
     if (isEmpty(box)) {
       extend(box, 0, 0);
@@ -271,6 +282,67 @@ export class XYPlot {
     return outside;
   }
 
+  // フィルタの軌跡。単色で、古い点ほど薄く描く。表示範囲外の点の数を返す。
+  // フィルタの位置が無効なサイクル (kok が偽) では線を切る。予測だけで進んだ点 (kupd が偽) は白抜きにし、
+  // そこへ向かう区間を点線にする。UDP の欠測 (dt が null) をまたぐ区間と、初期化した点 (kinit) へ向かう区間も
+  // 実測でつながっていないので点線にする。初期化した点には輪を重ねる。
+  _filterTrail(view, frame, from, to, colors) {
+    const { ctx } = this;
+    const fix = view.data.fix;
+    const count = to - from;
+    let outside = 0;
+    let prev = null;
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = colors.filter;
+    ctx.fillStyle = colors.filter;
+    for (let i = from; i <= to; i++) {
+      if (!fix.kok[i]) {
+        prev = null;
+        continue;
+      }
+      const x = fix.kx[i];
+      const y = fix.ky[i];
+      if (!frame.inView(x, y)) {
+        outside++;
+        prev = null;
+        continue;
+      }
+      const ratio = count > 0 ? (i - from) / count : 1;
+      ctx.globalAlpha = 0.3 + 0.7 * ratio;
+      const px = frame.toX(x);
+      const py = frame.toY(y);
+      const predicted = !fix.kupd[i];
+      if (prev) {
+        const gap = predicted || fix.kinit[i] || fix.dt[i] === null;
+        ctx.setLineDash(gap ? [4, 4] : []);
+        ctx.beginPath();
+        ctx.moveTo(prev[0], prev[1]);
+        ctx.lineTo(px, py);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+      ctx.beginPath();
+      ctx.arc(px, py, predicted ? 2.5 : 2, 0, Math.PI * 2);
+      if (predicted) {
+        ctx.lineWidth = 1;
+        ctx.stroke();
+        ctx.lineWidth = 1.5;
+      } else {
+        ctx.fill();
+      }
+      if (fix.kinit[i]) {
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.arc(px, py, 6, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.lineWidth = 1.5;
+      }
+      prev = [px, py];
+    }
+    ctx.globalAlpha = 1;
+    return outside;
+  }
+
   _anchors(view, frame, colors) {
     const { ctx } = this;
     ctx.font = "12px system-ui, sans-serif";
@@ -290,28 +362,65 @@ export class XYPlot {
     }
   }
 
-  // 現在位置のマーカー。セッションが終わっていればグレーで残す
-  _marker(view, frame, cursor, colors) {
+  // 現在位置のマーカー。最小二乗は円、フィルタは菱形で描き、セッションが終わっていればグレーで残す。
+  // 座標のラベルは、画面上で下にあるマーカーの下側と、上にあるマーカーの上側へ振り分けて重ならないようにする
+  _markers(view, frame, cursor, colors, showLS, showFilter) {
     const { ctx } = this;
-    const fix = view.data.fix;
-    const good = view.data.lastGoodBefore(cursor);
-    if (good < 0) return;
-    const x = fix.x[good];
-    const y = fix.y[good];
-    if (!frame.inView(x, y)) return;
-    const px = frame.toX(x);
-    const py = frame.toY(y);
-    ctx.fillStyle = view.ended ? colors.ended : colors.marker;
+    const { data } = view;
+    const fix = data.fix;
+    let ls = null;
+    let kf = null;
+    if (showLS) {
+      const good = data.lastGoodBefore(cursor);
+      if (good >= 0 && frame.inView(fix.x[good], fix.y[good])) {
+        ls = { x: fix.x[good], y: fix.y[good], px: frame.toX(fix.x[good]), py: frame.toY(fix.y[good]) };
+      }
+    }
+    if (showFilter) {
+      const good = data.lastFilterBefore(cursor);
+      if (good >= 0 && frame.inView(fix.kx[good], fix.ky[good])) {
+        kf = { x: fix.kx[good], y: fix.ky[good], px: frame.toX(fix.kx[good]), py: frame.toY(fix.ky[good]) };
+      }
+    }
+    // 既定では最小二乗のラベルを下、フィルタのラベルを上に置く。フィルタのほうが画面の下にあれば入れ替える
+    const lsBelow = !(ls && kf && kf.py > ls.py);
+
     ctx.strokeStyle = colors.fg;
     ctx.lineWidth = 1.5;
-    ctx.beginPath();
-    ctx.arc(px, py, 7, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.stroke();
-    ctx.fillStyle = colors.fg;
+    if (ls) {
+      ctx.fillStyle = view.ended ? colors.ended : colors.marker;
+      ctx.beginPath();
+      ctx.arc(ls.px, ls.py, 7, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+    }
+    if (kf) {
+      ctx.fillStyle = view.ended ? colors.ended : colors.filter;
+      ctx.beginPath();
+      ctx.moveTo(kf.px, kf.py - 8);
+      ctx.lineTo(kf.px + 8, kf.py);
+      ctx.lineTo(kf.px, kf.py + 8);
+      ctx.lineTo(kf.px - 8, kf.py);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+    }
+
+    // 軌跡の上に重なっても読めるよう、ラベルは背景色で縁取ってから描く
     ctx.font = "12px ui-monospace, Menlo, monospace";
     ctx.textAlign = "left";
-    ctx.textBaseline = "top";
-    ctx.fillText(`(${x.toFixed(2)}, ${y.toFixed(2)})`, px + 10, py + 6);
+    ctx.lineJoin = "round";
+    const label = (m, text, below) => {
+      const x = m.px + 11;
+      const y = below ? m.py + 6 : m.py - 6;
+      ctx.textBaseline = below ? "top" : "bottom";
+      ctx.strokeStyle = colors.panel;
+      ctx.lineWidth = 3;
+      ctx.strokeText(text, x, y);
+      ctx.fillStyle = colors.fg;
+      ctx.fillText(text, x, y);
+    };
+    if (ls) label(ls, `(${ls.x.toFixed(2)}, ${ls.y.toFixed(2)})`, lsBelow);
+    if (kf) label(kf, `フィルタ (${kf.x.toFixed(2)}, ${kf.y.toFixed(2)})`, !lsBelow || !ls);
   }
 }

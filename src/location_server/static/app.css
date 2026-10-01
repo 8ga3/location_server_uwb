@@ -18,6 +18,8 @@
   --on-status: #ffffff;
   --marker: #d64545;
   --ended: #7b8794;
+  /* フィルタの軌跡とマーカー。最小二乗の軌跡 (青から赤への色相) と重ならない紫にする */
+  --filter: #7b2cbf;
   color-scheme: light dark;
 }
 
@@ -38,6 +40,7 @@
     --on-status: #111418;
     --marker: #ff6b6b;
     --ended: #9aa5b1;
+    --filter: #c77dff;
   }
 }
 
@@ -152,6 +155,10 @@ table.anchors th { color: var(--fg-muted); font-weight: normal; }
 .lamp.warn { background: var(--warn); }
 .lamp.bad { background: var(--bad); }
 .swatch { display: inline-block; width: 10px; height: 3px; margin-right: 6px; vertical-align: 3px; }
+.check .swatch { margin-right: 0; }
+.swatch.trail-ls { background: linear-gradient(to right, hsl(220, 75%, 50%), hsl(0, 75%, 50%)); }
+.swatch.trail-filter { background: var(--filter); }
+.panel-head .checks { display: inline-flex; flex-wrap: wrap; gap: 4px 12px; }
 
 .chart { margin-bottom: 8px; }
 .chart .u-title { font-size: 13px; font-weight: normal; color: var(--fg-muted); }

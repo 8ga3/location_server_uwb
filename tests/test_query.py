@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
 
-from location_server.ingest.packet import CycleRecord, RangeRecord, TelemetryPacket
+from location_server.ingest.packet import (
+    FIX_FLAG_KF_INIT,
+    FIX_FLAG_KF_OK,
+    CycleRecord,
+    RangeRecord,
+    TelemetryPacket,
+)
 from location_server.store import QueryStore, ReceivedPacket, TelemetryStore
 from location_server.store import query as query_module
 from location_server.store.query import per_anchor_points, stride_for
@@ -16,23 +23,35 @@ from telemetry_helpers import ANCHORS, make_packet
 RECV_AT = "2026-09-30T00:00:00+00:00"
 
 
-def _failed_cycle(seq: int, t_tag_ms: int) -> CycleRecord:
-    """測位に失敗し、0x0101 の測距も失敗したサイクル。"""
+def _failed_cycle(seq: int, t_tag_ms: int, *, kf_predicted: bool = False) -> CycleRecord:
+    """測位に失敗し、0x0101 の測距も失敗したサイクル。
+
+    `kf_predicted` が偽ならフィルタも無効、真ならフィルタは予測だけで進み、測距を 3 本棄却している。
+    """
     return CycleRecord(
         seq=seq,
         t_tag_ms=t_tag_ms,
-        fix_flags=0,
+        fix_flags=FIX_FLAG_KF_OK if kf_predicted else 0,
         used_count=2,
         x_mm=0,
         y_mm=0,
         z_mm=0,
         residual_mm=0,
+        kf_x_mm=1300 if kf_predicted else 0,
+        kf_y_mm=-5500 if kf_predicted else 0,
+        kf_z_mm=1000 if kf_predicted else 0,
+        kf_sigma_mm=80 if kf_predicted else 0,
+        kf_used=0,
+        kf_rejected=3 if kf_predicted else 0,
         ranges=tuple(RangeRecord(a, 3 if a == 0x0101 else 0, 9, 0 if a == 0x0101 else 2000) for a in ANCHORS),
     )
 
 
 def _populate(store: TelemetryStore) -> int:
-    """seq 0..7 は成功、8..11 は欠番、12..15 のうち 12 と 13 は測位失敗のセッションを書く。"""
+    """seq 0..7 は成功、8..11 は欠番、12..15 のうち 12 と 13 は測位失敗のセッションを書く。
+
+    フィルタは seq 12 で無効、13 で予測のみ、14 で最小二乗の解から初期化し、ほかは観測で更新している。
+    """
     good = make_packet(seq=0, t_tag_ms=1000, count=8, period_ms=100)
     tail = make_packet(seq=12, t_tag_ms=2200, count=4, period_ms=100)
     tail = TelemetryPacket(
@@ -42,7 +61,12 @@ def _populate(store: TelemetryStore) -> int:
         seq=12,
         t_tag_ms=2200,
         anchor_n=tail.anchor_n,
-        cycles=(_failed_cycle(12, 2200), _failed_cycle(13, 2300), *tail.cycles[2:]),
+        cycles=(
+            _failed_cycle(12, 2200),
+            _failed_cycle(13, 2300, kf_predicted=True),
+            replace(tail.cycles[2], fix_flags=tail.cycles[2].fix_flags | FIX_FLAG_KF_INIT),
+            tail.cycles[3],
+        ),
     )
     result = store.write_packets([ReceivedPacket(good, RECV_AT), ReceivedPacket(tail, RECV_AT)])
     return result.sessions[(1, 0xAAAAAAAA)]
@@ -113,6 +137,23 @@ def test_track_returns_columns(client: TestClient, populated: int) -> None:
     assert fix["z"][0] == 1.0
 
 
+def test_track_returns_filter_columns(client: TestClient, populated: int) -> None:
+    fix = client.get(f"/api/v1/sessions/{populated}/track").json()["fix"]
+    # seq 7, 12, 13, 14 の並び
+    assert fix["kok"][7:11] == [True, False, True, True]
+    assert fix["kupd"][7:11] == [True, False, False, True]
+    assert fix["kinit"][7:11] == [False, False, False, True]
+    # 最小二乗が失敗した seq 13 でも、フィルタの位置はメートルで残る
+    assert fix["x"][9] is None
+    assert (fix["kx"][9], fix["ky"][9], fix["kz"][9], fix["ksig"][9]) == (1.3, -5.5, 1.0, 0.08)
+    # フィルタが無効な seq 12 は座標と標準偏差が null で、本数は残る
+    assert (fix["kx"][8], fix["ky"][8], fix["kz"][8], fix["ksig"][8]) == (None, None, None, None)
+    assert (fix["kused"][8], fix["krej"][8]) == (0, 0)
+    assert (fix["kx"][0], fix["ky"][0], fix["ksig"][0]) == (1.2, -5.6, 0.035)
+    assert (fix["kused"][0], fix["krej"][0]) == (4, 0)
+    assert (fix["kused"][9], fix["krej"][9]) == (0, 3)
+
+
 def test_track_time_range_and_decimation(client: TestClient, populated: int) -> None:
     payload = client.get(
         f"/api/v1/sessions/{populated}/track", params={"from_ms": 1100, "to_ms": 2300, "max_points": 3}
@@ -179,6 +220,12 @@ def test_summary(client: TestClient, populated: int) -> None:
     assert payload["period_mean_ms"] == pytest.approx(100)
     assert payload["period_max_ms"] == 100
     assert (payload["used_min"], payload["used_max"]) == (2, 4)
+    # フィルタは seq 12 だけが無効で、seq 13 が予測のみ、seq 14 で初期化している
+    assert payload["kf_ok_cycles"] == 11
+    assert payload["kf_predicted_cycles"] == 1
+    assert payload["kf_init_count"] == 1
+    assert payload["kf_rejected_ranges"] == 3
+    assert payload["kf_sigma_mean"] == pytest.approx((10 * 0.035 + 0.08) / 11)
     by_id = {entry["id"]: entry for entry in payload["ranges"]}
     a1 = by_id["0x0101"]
     assert (a1["samples"], a1["ok_samples"]) == (12, 10)
@@ -213,6 +260,9 @@ def test_query_store_summary_without_data(client: TestClient) -> None:
     assert summary is not None
     assert summary.residual_rms_mm is None
     assert summary.period_mean_ms is None
+    assert (summary.kf_ok_cycles, summary.kf_predicted_cycles, summary.kf_init_count) == (0, 0, 0)
+    assert summary.kf_rejected_ranges == 0
+    assert summary.kf_sigma_mean_mm is None
     assert summary.anchors == ()
     assert summary.session.cycles == 0
 
