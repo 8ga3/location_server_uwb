@@ -1,8 +1,12 @@
 // 描画するデータの入れ物。ライブ (WebSocket) と再生 (参照 API) のどちらから来たデータも、
 // サーバーが返す列指向の形 (fix / ranges) のままここへ積み、描画側はこれだけを見る。
 // 列の意味は src/location_server/columns.py を参照。t はタグの millis()、長さはメートル。
+// k で始まる列はタグ側のカルマンフィルタの出力で、最小二乗の列 (x / y / z / ok) とは独立に入る。
 
-export const FIX_KEYS = ["t", "seq", "dt", "x", "y", "z", "ok", "used", "resid"];
+export const FIX_KEYS = [
+  "t", "seq", "dt", "x", "y", "z", "ok", "used", "resid",
+  "kx", "ky", "kz", "kok", "kupd", "kinit", "ksig", "kused", "krej",
+];
 export const RANGE_KEYS = ["t", "seq", "d", "st", "el"];
 
 function emptyColumns(keys) {
@@ -168,6 +172,14 @@ export class SessionData {
   lastGoodBefore(index) {
     for (let i = index; i >= 0; i--) {
       if (this.fix.ok[i]) return i;
+    }
+    return -1;
+  }
+
+  // 直前にフィルタの位置が有効だったサイクル。フィルタの現在位置のマーカーを描く場所に使う
+  lastFilterBefore(index) {
+    for (let i = index; i >= 0; i--) {
+      if (this.fix.kok[i]) return i;
     }
     return -1;
   }

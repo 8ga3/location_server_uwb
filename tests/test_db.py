@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import sqlite3
 
+import pytest
+
+from location_server import db
 from location_server.db import MIGRATIONS, connect, migrate
 
 EXPECTED_TABLES = {
@@ -63,5 +66,34 @@ def test_wal_mode_on_file_database(db_path: object) -> None:
     try:
         mode = connection.execute("PRAGMA journal_mode").fetchone()[0]
         assert mode.lower() == "wal"
+    finally:
+        connection.close()
+
+
+def test_migrate_from_version_1_adds_filter_columns(monkeypatch: pytest.MonkeyPatch) -> None:
+    connection = connect(":memory:")
+    try:
+        # 0001 だけを当てた DB (フィルタの列を足す前) に、測位記録を 1 行書いておく
+        monkeypatch.setattr(db, "MIGRATIONS", MIGRATIONS[:1])
+        assert migrate(connection) == 1
+        connection.execute(
+            "INSERT INTO session (tag_id, boot_id, started_at, last_seen_at) VALUES (1, 1, 'a', 'a')"
+        )
+        connection.execute(
+            """
+            INSERT INTO position_fix
+                (session_id, seq, t_tag_ms, recv_at, ok, x_mm, y_mm, z_mm, used_count, residual_mm, method)
+            VALUES (1, 0, 1000, 'a', 1, 10, 20, 1000, 4, 42, 'trilat2d')
+            """
+        )
+        monkeypatch.setattr(db, "MIGRATIONS", MIGRATIONS)
+        assert migrate(connection) == MIGRATIONS[-1][0] == 2
+        row = connection.execute("SELECT * FROM position_fix").fetchone()
+        assert (row["ok"], row["x_mm"], row["residual_mm"]) == (1, 10, 42)
+        assert (row["kf_ok"], row["kf_updated"], row["kf_init"]) == (0, 0, 0)
+        for column in ("kf_x_mm", "kf_y_mm", "kf_z_mm", "kf_sigma_mm", "kf_used", "kf_rejected"):
+            assert row[column] is None, column
+        # 初期リビジョンは 0001 を当てたときの 1 行だけ
+        assert connection.execute("SELECT count(*) FROM config_meta").fetchone()[0] == 1
     finally:
         connection.close()

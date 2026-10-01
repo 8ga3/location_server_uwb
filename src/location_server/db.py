@@ -12,7 +12,10 @@ from importlib import resources
 from pathlib import Path
 
 # (user_version, SQL ファイル名) を昇順に並べる
-MIGRATIONS: tuple[tuple[int, str], ...] = ((1, "0001_initial.sql"),)
+MIGRATIONS: tuple[tuple[int, str], ...] = (
+    (1, "0001_initial.sql"),
+    (2, "0002_kalman_filter.sql"),
+)
 
 INITIAL_PAN_ID = 0xDECA
 INITIAL_BATCH_CYCLES = 4

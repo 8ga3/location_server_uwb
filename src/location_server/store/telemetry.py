@@ -171,14 +171,21 @@ class TelemetryStore:
         測位に失敗したサイクルは座標と方式を NULL にする。タグは失敗時の座標欄に意味のある値を
         入れないためで、成功したサイクルの値は発散していてもそのまま残す。
         測距も同様に、`status != 0` のときは距離を NULL にする (設計文書 4.1)。
+
+        フィルタの列は最小二乗の成否とは独立に扱う。最小二乗が解けず予測だけで進んだサイクルでも、
+        フィルタの位置が有効 (`kf_ok`) なら座標と標準偏差を残す。無効なサイクルではタグが座標欄に
+        意味のある値を入れないので、座標と標準偏差を NULL にし、更新と初期化のフラグも 0 にする。
+        取り込み数と棄却数は有効・無効にかかわらず送られた値をそのまま残す。
         """
         ok = cycle.fix_ok
         method = (METHOD_TRILAT3D if cycle.fix_3d else METHOD_TRILAT2D) if ok else None
+        kf_ok = cycle.kf_ok
         cursor = self._conn.execute(
             """
             INSERT OR IGNORE INTO position_fix
-                (session_id, seq, t_tag_ms, recv_at, ok, x_mm, y_mm, z_mm, used_count, residual_mm, method)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (session_id, seq, t_tag_ms, recv_at, ok, x_mm, y_mm, z_mm, used_count, residual_mm, method,
+                 kf_ok, kf_updated, kf_init, kf_x_mm, kf_y_mm, kf_z_mm, kf_sigma_mm, kf_used, kf_rejected)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 session_id,
@@ -192,6 +199,15 @@ class TelemetryStore:
                 cycle.used_count,
                 cycle.residual_mm,
                 method,
+                int(kf_ok),
+                int(kf_ok and cycle.kf_updated),
+                int(kf_ok and cycle.kf_init),
+                cycle.kf_x_mm if kf_ok else None,
+                cycle.kf_y_mm if kf_ok else None,
+                cycle.kf_z_mm if kf_ok else None,
+                cycle.kf_sigma_mm if kf_ok else None,
+                cycle.kf_used,
+                cycle.kf_rejected,
             ),
         )
         if cursor.rowcount == 0:

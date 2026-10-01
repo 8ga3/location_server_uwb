@@ -185,6 +185,10 @@ class FixColumnsOut(BaseModel):
     """測位結果の列。`t` はタグの millis()、長さはメートル。測位に失敗したサイクルの座標は null。
 
     `dt` は直前のサイクルからの時刻差 [ms] で、欠番をまたぐ場合は null。間引く前に求める。
+    `k` で始まる列はタグ側のカルマンフィルタの出力で、最小二乗の `ok` とは独立に入る。
+    `kx` / `ky` / `kz` / `ksig` はフィルタの位置が無効 (`kok` が偽) なら null。`kupd` は観測で更新したか
+    (偽なら予測のみ)、`kinit` は最小二乗の解から初期化したか。`kused` / `krej` はフィルタが取り込んだ測距と
+    棄却した測距の本数で、フィルタの列を足す前に記録した行では null。
     """
 
     t: list[int]
@@ -196,6 +200,15 @@ class FixColumnsOut(BaseModel):
     ok: list[bool]
     used: list[int | None]
     resid: list[float | None]
+    kx: list[float | None]
+    ky: list[float | None]
+    kz: list[float | None]
+    kok: list[bool]
+    kupd: list[bool]
+    kinit: list[bool]
+    ksig: list[float | None]
+    kused: list[int | None]
+    krej: list[int | None]
 
 
 class RangeColumnsOut(BaseModel):
@@ -279,6 +292,12 @@ class SummaryOut(BaseModel):
 
     `anchors` はそのセッションが使った構成リビジョン (`anchors_rev`) の座標表。
     セッションの構成リビジョンがわからない場合は現在の構成を返し、`anchors_rev` でそれと示す。
+
+    `kf_` で始まる項目はタグ側のカルマンフィルタの集計。`kf_ok_cycles` はフィルタの位置が有効だった
+    サイクル数、`kf_predicted_cycles` はそのうち観測による更新が無かった (予測のみの) サイクル数、
+    `kf_init_count` は最小二乗の解から初期化したサイクル数、`kf_rejected_ranges` はゲートで棄却した
+    測距の合計本数。`kf_sigma_mean` はフィルタが有効なサイクルの位置の標準偏差の平均 [m] で、
+    有効なサイクルが無ければ null。
     """
 
     session: SessionOut
@@ -287,6 +306,11 @@ class SummaryOut(BaseModel):
     period_max_ms: int | None
     used_min: int | None
     used_max: int | None
+    kf_ok_cycles: int
+    kf_predicted_cycles: int
+    kf_init_count: int
+    kf_rejected_ranges: int
+    kf_sigma_mean: float | None
     ranges: list[AnchorSummaryOut]
     anchors_rev: int
     anchors: list[LiveAnchorOut]
@@ -330,6 +354,11 @@ def to_summary_out(summary: SessionSummary, anchors: ConfigSnapshot) -> SummaryO
         period_max_ms=summary.period_max_ms,
         used_min=summary.used_min,
         used_max=summary.used_max,
+        kf_ok_cycles=summary.kf_ok_cycles,
+        kf_predicted_cycles=summary.kf_predicted_cycles,
+        kf_init_count=summary.kf_init_count,
+        kf_rejected_ranges=summary.kf_rejected_ranges,
+        kf_sigma_mean=None if summary.kf_sigma_mean_mm is None else summary.kf_sigma_mean_mm / 1000,
         ranges=[
             AnchorSummaryOut(
                 id=format_hex_id(stats.anchor_id),

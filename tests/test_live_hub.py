@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from typing import Any
 
 import pytest
 
-from location_server.ingest.packet import RangeRecord, TelemetryPacket
+from location_server.ingest.packet import FIX_FLAG_KF_OK, RangeRecord, TelemetryPacket
 from location_server.live import LiveHub, Subscriber, SubscriberOverflowError
 from location_server.live.hub import END_NEW_SESSION, END_TAG_LAST, END_TIMEOUT
 from telemetry_helpers import make_packet
@@ -69,6 +70,16 @@ def test_publish_then_tick_sends_session_start_and_append() -> None:
     assert append["fix"]["x"] == [1.234] * 4
     assert append["fix"]["y"] == [-5.678] * 4
     assert append["fix"]["ok"] == [True] * 4
+    # フィルタの列も参照 API と同じ列名・単位 (メートル) で載る
+    assert append["fix"]["kx"] == [1.2] * 4
+    assert append["fix"]["ky"] == [-5.6] * 4
+    assert append["fix"]["kz"] == [1.0] * 4
+    assert append["fix"]["ksig"] == [0.035] * 4
+    assert append["fix"]["kok"] == [True] * 4
+    assert append["fix"]["kupd"] == [True] * 4
+    assert append["fix"]["kinit"] == [False] * 4
+    assert append["fix"]["kused"] == [4] * 4
+    assert append["fix"]["krej"] == [0] * 4
     assert set(append["ranges"]) == {"0x0100", "0x0101", "0x0102", "0x0103"}
     assert append["ranges"]["0x0101"]["d"] == [1.1] * 4
     # 次の tick までに新しいサイクルが無ければ何も送らない
@@ -292,6 +303,12 @@ def test_failed_fix_and_failed_range_are_null() -> None:
                 y_mm=0,
                 z_mm=0,
                 residual_mm=0,
+                kf_x_mm=0,
+                kf_y_mm=0,
+                kf_z_mm=0,
+                kf_sigma_mm=0,
+                kf_used=0,
+                kf_rejected=0,
                 ranges=(RangeRecord(0x0100, 3, 7, 0), *cycle.ranges[1:]),
             ),
         ),
@@ -304,6 +321,10 @@ def test_failed_fix_and_failed_range_are_null() -> None:
     assert snapshot["fix"]["ok"] == [False]
     assert snapshot["fix"]["x"] == [None]
     assert snapshot["fix"]["used"] == [2]
+    assert snapshot["fix"]["kok"] == [False]
+    assert snapshot["fix"]["kx"] == [None]
+    assert snapshot["fix"]["ksig"] == [None]
+    assert (snapshot["fix"]["kused"], snapshot["fix"]["krej"]) == ([0], [0])
     assert snapshot["ranges"]["0x0100"] == {"t": [1000], "seq": [0], "d": [None], "st": [3], "el": [7]}
 
 
@@ -501,3 +522,27 @@ def test_session_info_is_not_sent_for_replaced_session() -> None:
     hub.note_sessions({(1, 1): 7, (1, 2): 8})
     assert _drain(sub) == []
     assert hub.sessions[1].session_id == 8
+
+
+def test_predict_only_cycle_keeps_filter_position() -> None:
+    hub, _ = _hub()
+    packet = make_packet(seq=0, count=1)
+    cycle = replace(
+        packet.cycles[0],
+        fix_flags=FIX_FLAG_KF_OK,
+        kf_x_mm=-1500,
+        kf_y_mm=2500,
+        kf_sigma_mm=65535,
+        kf_used=0,
+        kf_rejected=2,
+    )
+    hub.publish(replace(packet, cycles=(cycle,)))
+    hub.tick()
+    sub = hub.connect()
+    hub.subscribe(sub, 1)
+    [snapshot] = _drain(sub)
+    fix = snapshot["fix"]
+    assert (fix["ok"], fix["x"]) == ([False], [None])
+    assert (fix["kok"], fix["kupd"], fix["kinit"]) == ([True], [False], [False])
+    assert (fix["kx"], fix["ky"], fix["kz"], fix["ksig"]) == ([-1.5], [2.5], [1.0], [65.535])
+    assert (fix["kused"], fix["krej"]) == ([0], [2])

@@ -29,7 +29,11 @@
   <section class="panel xy-panel" aria-label="XY 軌跡">
     <div class="panel-head">
       <h2>XY 軌跡</h2>
-      <label class="check"><input id="fit-trail" type="checkbox"> 軌跡に合わせて表示範囲を広げる</label>
+      <span class="checks">
+        <label class="check"><input id="show-ls" type="checkbox" checked><span class="swatch trail-ls"></span> 最小二乗</label>
+        <label class="check"><input id="show-filter" type="checkbox" checked><span class="swatch trail-filter"></span> フィルタ</label>
+        <label class="check"><input id="fit-trail" type="checkbox"> 軌跡に合わせて表示範囲を広げる</label>
+      </span>
     </div>
     <div class="xy-wrap"><canvas id="xy"></canvas></div>
   </section>

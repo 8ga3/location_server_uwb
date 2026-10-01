@@ -4,10 +4,19 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+from dataclasses import replace
 
 import pytest
 
-from location_server.ingest.packet import CycleRecord, RangeRecord, TelemetryPacket
+from location_server.ingest.packet import (
+    FIX_FLAG_KF_INIT,
+    FIX_FLAG_KF_OK,
+    FIX_FLAG_KF_UPDATED,
+    FIX_FLAG_OK,
+    CycleRecord,
+    RangeRecord,
+    TelemetryPacket,
+)
 from location_server.store import ReceivedPacket, TelemetryStore
 from telemetry_helpers import make_packet
 
@@ -46,6 +55,9 @@ def test_rows_keep_values(conn: sqlite3.Connection, telemetry: TelemetryStore) -
     assert (fix["seq"], fix["t_tag_ms"], fix["ok"]) == (7, 2000, 1)
     assert (fix["x_mm"], fix["y_mm"], fix["z_mm"]) == (1234, -5678, 1000)
     assert (fix["used_count"], fix["residual_mm"], fix["method"]) == (4, 42, "trilat2d")
+    assert (fix["kf_ok"], fix["kf_updated"], fix["kf_init"]) == (1, 1, 0)
+    assert (fix["kf_x_mm"], fix["kf_y_mm"], fix["kf_z_mm"], fix["kf_sigma_mm"]) == (1200, -5600, 1000, 35)
+    assert (fix["kf_used"], fix["kf_rejected"]) == (4, 0)
     rng = conn.execute("SELECT * FROM range_sample WHERE anchor_id = 0x0101").fetchone()
     assert (rng["seq"], rng["status"], rng["distance_mm"], rng["elapsed_ms"]) == (7, 0, 1100, 6)
 
@@ -60,6 +72,12 @@ def test_failed_fix_and_range_store_null(conn: sqlite3.Connection, telemetry: Te
         y_mm=0,
         z_mm=0,
         residual_mm=0,
+        kf_x_mm=0,
+        kf_y_mm=0,
+        kf_z_mm=0,
+        kf_sigma_mm=0,
+        kf_used=0,
+        kf_rejected=0,
         ranges=(RangeRecord(0x0100, status=11, elapsed_ms=9, distance_mm=0),),
     )
     packet = TelemetryPacket(flags=0, tag_id=2, boot_id=1, seq=0, t_tag_ms=0, anchor_n=1, cycles=(cycle,))
@@ -71,20 +89,66 @@ def test_failed_fix_and_range_store_null(conn: sqlite3.Connection, telemetry: Te
     assert (rng["status"], rng["distance_mm"], rng["elapsed_ms"]) == (11, None, 9)
 
 
+def test_failed_fix_keeps_valid_filter(conn: sqlite3.Connection, telemetry: TelemetryStore) -> None:
+    # 最小二乗が解けず、フィルタが予測だけで進んだサイクル。フィルタの位置は残す
+    base = make_packet(count=1)
+    cycle = replace(
+        base.cycles[0],
+        fix_flags=FIX_FLAG_KF_OK,
+        x_mm=0,
+        y_mm=0,
+        z_mm=0,
+        kf_x_mm=-2500,
+        kf_y_mm=3100,
+        kf_z_mm=1000,
+        kf_sigma_mm=90,
+        kf_used=0,
+        kf_rejected=2,
+    )
+    telemetry.write_packets([_received(replace(base, cycles=(cycle,)))])
+    fix = conn.execute("SELECT * FROM position_fix").fetchone()
+    assert fix["ok"] == 0
+    assert (fix["x_mm"], fix["y_mm"], fix["z_mm"], fix["method"]) == (None, None, None, None)
+    assert (fix["kf_ok"], fix["kf_updated"], fix["kf_init"]) == (1, 0, 0)
+    assert (fix["kf_x_mm"], fix["kf_y_mm"], fix["kf_z_mm"], fix["kf_sigma_mm"]) == (-2500, 3100, 1000, 90)
+    assert (fix["kf_used"], fix["kf_rejected"]) == (0, 2)
+
+
+def test_invalid_filter_stores_null(conn: sqlite3.Connection, telemetry: TelemetryStore) -> None:
+    # フィルタが無効なら、座標欄に値が入っていても座標と標準偏差は NULL、更新と初期化のフラグは 0 にする。
+    # 取り込み数と棄却数は送られた値のまま残す
+    base = make_packet(count=1)
+    cycle = replace(
+        base.cycles[0],
+        fix_flags=FIX_FLAG_OK | FIX_FLAG_KF_UPDATED | FIX_FLAG_KF_INIT,
+        kf_x_mm=111,
+        kf_y_mm=222,
+        kf_z_mm=333,
+        kf_sigma_mm=444,
+        kf_used=1,
+        kf_rejected=3,
+    )
+    telemetry.write_packets([_received(replace(base, cycles=(cycle,)))])
+    fix = conn.execute("SELECT * FROM position_fix").fetchone()
+    assert (fix["ok"], fix["x_mm"]) == (1, 1234)
+    assert (fix["kf_ok"], fix["kf_updated"], fix["kf_init"]) == (0, 0, 0)
+    assert (fix["kf_x_mm"], fix["kf_y_mm"], fix["kf_z_mm"], fix["kf_sigma_mm"]) == (None, None, None, None)
+    assert (fix["kf_used"], fix["kf_rejected"]) == (1, 3)
+
+
+def test_filter_init_flag(conn: sqlite3.Connection, telemetry: TelemetryStore) -> None:
+    base = make_packet(count=1)
+    flags = FIX_FLAG_OK | FIX_FLAG_KF_OK | FIX_FLAG_KF_UPDATED | FIX_FLAG_KF_INIT
+    cycle = replace(base.cycles[0], fix_flags=flags)
+    telemetry.write_packets([_received(replace(base, cycles=(cycle,)))])
+    fix = conn.execute("SELECT kf_ok, kf_updated, kf_init FROM position_fix").fetchone()
+    assert tuple(fix) == (1, 1, 1)
+
+
 def test_3d_fix_method(conn: sqlite3.Connection, telemetry: TelemetryStore) -> None:
     base = make_packet(count=1)
     cycle = base.cycles[0]
-    cycle3d = CycleRecord(
-        seq=cycle.seq,
-        t_tag_ms=cycle.t_tag_ms,
-        fix_flags=0x03,
-        used_count=cycle.used_count,
-        x_mm=cycle.x_mm,
-        y_mm=cycle.y_mm,
-        z_mm=cycle.z_mm,
-        residual_mm=cycle.residual_mm,
-        ranges=cycle.ranges,
-    )
+    cycle3d = replace(cycle, fix_flags=0x03)
     packet = TelemetryPacket(
         flags=0, tag_id=1, boot_id=1, seq=cycle.seq, t_tag_ms=cycle.t_tag_ms, anchor_n=4, cycles=(cycle3d,)
     )

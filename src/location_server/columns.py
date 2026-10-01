@@ -12,6 +12,10 @@
 - 長さ (`x` / `y` / `z` / `resid` / `d`) はメートル。API の JSON でのみメートルへ直す方針に従う
 - 測位に失敗したサイクルは `x` / `y` / `z` を `null`、測距に失敗した記録は `d` を `null` にする。
   DB 側も同じ行を NULL で保存しているので、ライブと再生で見え方が変わらない
+- `kx` / `ky` / `kz` / `ksig` はタグ側のカルマンフィルタの位置と位置の標準偏差 [m]。最小二乗の `ok` とは
+  独立で、フィルタの位置が無効 (`kok` が偽) なサイクルだけ `null` にする。`kupd` は観測で更新したか
+  (偽なら予測のみ)、`kinit` は最小二乗の解から初期化したかで、`kok` が偽なら偽とする。`kused` / `krej` は
+  フィルタが取り込んだ測距と棄却した測距の本数で、フィルタの列を足す前に記録した行では `null` になる
 """
 
 from __future__ import annotations
@@ -40,6 +44,15 @@ class FixColumns:
     ok: list[bool] = field(default_factory=list)
     used: list[int | None] = field(default_factory=list)
     resid: list[float | None] = field(default_factory=list)
+    kx: list[float | None] = field(default_factory=list)
+    ky: list[float | None] = field(default_factory=list)
+    kz: list[float | None] = field(default_factory=list)
+    kok: list[bool] = field(default_factory=list)
+    kupd: list[bool] = field(default_factory=list)
+    kinit: list[bool] = field(default_factory=list)
+    ksig: list[float | None] = field(default_factory=list)
+    kused: list[int | None] = field(default_factory=list)
+    krej: list[int | None] = field(default_factory=list)
 
     def __len__(self) -> int:
         return len(self.t)
@@ -56,8 +69,21 @@ class FixColumns:
         z_mm: int | None,
         used: int | None,
         resid_mm: int | None,
+        kf_ok: bool,
+        kf_updated: bool,
+        kf_init: bool,
+        kf_x_mm: int | None,
+        kf_y_mm: int | None,
+        kf_z_mm: int | None,
+        kf_sigma_mm: int | None,
+        kf_used: int | None,
+        kf_rejected: int | None,
     ) -> None:
-        """1 サイクルぶんを足す。測位に失敗したサイクルの座標は値が入っていても捨てる。"""
+        """1 サイクルぶんを足す。
+
+        測位に失敗したサイクルの座標と、フィルタの位置が無効なサイクルのフィルタの座標・標準偏差は、
+        値が入っていても捨てる。フィルタの列は最小二乗の成否と関係なく `kf_ok` だけで決める。
+        """
         self.t.append(t_ms)
         self.seq.append(seq)
         self.dt.append(dt_ms)
@@ -67,6 +93,15 @@ class FixColumns:
         self.ok.append(ok)
         self.used.append(used)
         self.resid.append(_meters_or_none(resid_mm))
+        self.kx.append(_meters_or_none(kf_x_mm) if kf_ok else None)
+        self.ky.append(_meters_or_none(kf_y_mm) if kf_ok else None)
+        self.kz.append(_meters_or_none(kf_z_mm) if kf_ok else None)
+        self.kok.append(kf_ok)
+        self.kupd.append(kf_ok and kf_updated)
+        self.kinit.append(kf_ok and kf_init)
+        self.ksig.append(_meters_or_none(kf_sigma_mm) if kf_ok else None)
+        self.kused.append(kf_used)
+        self.krej.append(kf_rejected)
 
     def add_cycle(self, cycle: CycleRecord, *, t_ms: int, seq: int, dt_ms: int | None) -> None:
         """受信したサイクルを足す。`t_ms` / `seq` には折り返しを展開した値を渡す。"""
@@ -80,6 +115,15 @@ class FixColumns:
             z_mm=cycle.z_mm,
             used=cycle.used_count,
             resid_mm=cycle.residual_mm,
+            kf_ok=cycle.kf_ok,
+            kf_updated=cycle.kf_updated,
+            kf_init=cycle.kf_init,
+            kf_x_mm=cycle.kf_x_mm,
+            kf_y_mm=cycle.kf_y_mm,
+            kf_z_mm=cycle.kf_z_mm,
+            kf_sigma_mm=cycle.kf_sigma_mm,
+            kf_used=cycle.kf_used,
+            kf_rejected=cycle.kf_rejected,
         )
 
     def to_json(self) -> dict[str, list[Any]]:
@@ -93,6 +137,15 @@ class FixColumns:
             "ok": self.ok,
             "used": self.used,
             "resid": self.resid,
+            "kx": self.kx,
+            "ky": self.ky,
+            "kz": self.kz,
+            "kok": self.kok,
+            "kupd": self.kupd,
+            "kinit": self.kinit,
+            "ksig": self.ksig,
+            "kused": self.kused,
+            "krej": self.krej,
         }
 
 
