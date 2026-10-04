@@ -48,6 +48,8 @@ FAKE_CENTER_MM = (2500, 2000)
 FAKE_RADIUS_MM = 1500
 FAKE_LAP_MS = 20_000
 FAKE_TAG_Z_MM = 1000
+# 最小二乗が解けるのに要る測距の本数 (タグの TRILAT_MIN_RANGES と同じ)
+FAKE_MIN_RANGES = 3
 
 
 def format_cycle(packet: TelemetryPacket, cycle: CycleRecord) -> str:
@@ -120,15 +122,16 @@ def _fake_cycle(seq: int, t_ms: int, anchors: list[int], rng: random.Random) -> 
     """それらしい値を持つ擬似サイクル。
 
     タグは円軌道を一定の速さで回るものとし、最小二乗の解は真の位置に数十 mm のばらつきを、
-    フィルタの位置はそれより小さいばらつきを持たせる。1 割の確率で測距を失敗させる。
-    5% の確率で全アンカーの測距が失敗したサイクルにし、最小二乗は解けず、フィルタは予測だけで進んだ
-    ことにする。先頭のサイクル (`seq = 0`) では最小二乗の解からフィルタを初期化したことにする。
+    フィルタの位置はそれより小さいばらつきを持たせる。1 割の確率で測距を失敗させ、5% の確率で全アンカーの
+    測距を失敗させる。フラグはタグと同じ規則で決める。最小二乗は成功した測距が 3 本以上のときだけ解け、
+    フィルタは取り込めた測距が 1 本以上あれば観測で更新したことにし、無ければ予測だけで進んだことにする。
+    先頭のサイクル (`seq = 0`) は全アンカーの測距を成功させ、最小二乗の解からフィルタを初期化したことにする。
     """
     init = seq == 0
-    predict_only = not init and rng.random() < 0.05
+    blackout = not init and rng.random() < 0.05
     ranges = []
     for anchor_id in anchors:
-        if predict_only or rng.random() < 0.1:
+        if blackout or (not init and rng.random() < 0.1):
             ranges.append(RangeRecord(anchor_id, status=11, elapsed_ms=rng.randint(4, 8), distance_mm=0))
         else:
             ranges.append(
@@ -137,6 +140,7 @@ def _fake_cycle(seq: int, t_ms: int, anchors: list[int], rng: random.Random) -> 
                 )
             )
     used = sum(r.ok for r in ranges)
+    ls_ok = used >= FAKE_MIN_RANGES
     angle = 2 * math.pi * (t_ms % FAKE_LAP_MS) / FAKE_LAP_MS
     true_x = FAKE_CENTER_MM[0] + FAKE_RADIUS_MM * math.cos(angle)
     true_y = FAKE_CENTER_MM[1] + FAKE_RADIUS_MM * math.sin(angle)
@@ -144,16 +148,20 @@ def _fake_cycle(seq: int, t_ms: int, anchors: list[int], rng: random.Random) -> 
     ls_y = round(true_y + rng.gauss(0, 60))
 
     fix_flags = FIX_FLAG_KF_OK
-    if predict_only:
-        kf_used = 0
+    if ls_ok:
+        fix_flags |= FIX_FLAG_OK
+    if init:
+        # 初期化した周期の kf_used は、初期化に使った最小二乗の本数 (タグと同じ)
+        kf_used = used
         kf_rejected = 0
-        kf_sigma = rng.randint(60, 120)
+        kf_sigma = rng.randint(150, 250)
     else:
-        fix_flags |= FIX_FLAG_OK | FIX_FLAG_KF_UPDATED
         # 取り込めた測距のうち、たまに 1 本をゲートで棄却する
-        kf_rejected = 1 if not init and used > 0 and rng.random() < 0.05 else 0
+        kf_rejected = 1 if used > 0 and rng.random() < 0.05 else 0
         kf_used = used - kf_rejected
-        kf_sigma = rng.randint(150, 250) if init else rng.randint(20, 60)
+        kf_sigma = rng.randint(20, 60) if kf_used > 0 else rng.randint(60, 120)
+    if init or kf_used > 0:
+        fix_flags |= FIX_FLAG_KF_UPDATED
     if init:
         fix_flags |= FIX_FLAG_KF_INIT
         kf_x, kf_y = ls_x, ls_y
@@ -166,10 +174,10 @@ def _fake_cycle(seq: int, t_ms: int, anchors: list[int], rng: random.Random) -> 
         fix_flags=fix_flags,
         used_count=used,
         # 最小二乗が解けなかったサイクルは、タグと同じく座標欄を 0 のまま送る
-        x_mm=0 if predict_only else ls_x,
-        y_mm=0 if predict_only else ls_y,
+        x_mm=ls_x if ls_ok else 0,
+        y_mm=ls_y if ls_ok else 0,
         z_mm=FAKE_TAG_Z_MM,
-        residual_mm=0 if predict_only else rng.randint(10, 80),
+        residual_mm=rng.randint(10, 80) if ls_ok else 0,
         kf_x_mm=kf_x,
         kf_y_mm=kf_y,
         kf_z_mm=FAKE_TAG_Z_MM,

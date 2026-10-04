@@ -61,8 +61,24 @@ def test_fake_cycles_encode_and_stay_consistent() -> None:
             # フィルタの位置は最小二乗の解の近くにある
             assert abs(cycle.kf_x_mm - cycle.x_mm) < 1000
             assert abs(cycle.kf_y_mm - cycle.y_mm) < 1000
-        else:
-            assert not cycle.kf_updated
+
+
+def test_fake_cycle_flags_follow_the_tag_rules() -> None:
+    # 最小二乗は成功した測距が 3 本以上のときだけ解け、
+    # フィルタは 1 本以上取り込めたときだけ観測で更新したことになる
+    rng = random.Random(2)
+    anchors = [0x0100 + i for i in range(4)]
+    cycles = [dump_udp._fake_cycle(seq, seq * 100, anchors, rng) for seq in range(3000)]
+    for cycle in cycles:
+        used = sum(r.ok for r in cycle.ranges)
+        assert cycle.used_count == used
+        assert cycle.fix_ok == (used >= dump_udp.FAKE_MIN_RANGES)
+        assert cycle.kf_updated == (cycle.kf_init or cycle.kf_used > 0)
+        if not cycle.fix_ok:
+            assert (cycle.x_mm, cycle.y_mm, cycle.residual_mm) == (0, 0, 0)
+    # 予測だけの周期と、最小二乗は解けないがフィルタは観測で更新した周期の両方が現れる
+    assert any(not c.kf_updated for c in cycles)
+    assert any(not c.fix_ok and c.kf_updated for c in cycles)
 
 
 def test_recv_buffer_holds_largest_valid_packet() -> None:
