@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 from fastapi.testclient import TestClient
 
 ANCHOR_BODY = {"label": "北西の柱", "x": 0.0, "y": 0.0, "z": 1.8}
@@ -184,6 +185,88 @@ def test_telemetry_batch_cycles_limited_to_packet_count(client: TestClient) -> N
         "/api/v1/config/telemetry", json={"host": "192.168.1.10", "port": 47100, "batch_cycles": 17}
     )
     assert too_many.status_code == 422
+
+
+BULK_BODY = {
+    "note": "room-1",
+    "anchors": [
+        {"id": "0x0100", "x": 0.0, "y": 0.0, "z": 0.26, "label": "左前"},
+        {"id": "0x0101", "x": 2.3, "y": 0.0, "z": 0.26, "label": "右前"},
+        {"id": "0x0102", "x": 2.3, "y": 1.76, "z": 0.26, "label": "右奥"},
+        {"id": "259", "x": 0.0, "y": 1.76, "z": 0.26, "enabled": False},
+    ],
+}
+
+
+def test_bulk_replace_bumps_revision_once(client: TestClient) -> None:
+    client.put("/api/v1/anchors/0x0105", json=ANCHOR_BODY)
+
+    response = client.post("/api/v1/anchors:bulk", json=BULK_BODY)
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["rev"] == 3
+    assert response.headers["etag"] == '"rev-3"'
+    # 本文に無い 0x0105 は削除され、10 進数で書いた ID も 0x 形式で返る
+    assert [(a["id"], a["enabled"], a["source"]) for a in payload["anchors"]] == [
+        ("0x0100", True, "manual"),
+        ("0x0101", True, "manual"),
+        ("0x0102", True, "manual"),
+        ("0x0103", False, "manual"),
+    ]
+    assert client.get("/api/v1/anchors").json() == payload
+
+    config = client.get("/api/v1/config").json()
+    assert config["rev"] == 3
+    assert [(a["id"], a["x"], a["y"]) for a in config["anchors"]] == [
+        ("0x0100", 0.0, 0.0),
+        ("0x0101", 2.3, 0.0),
+        ("0x0102", 2.3, 1.76),
+    ]
+    # 置換前のリビジョンでは 0x0105 だけが残っている
+    past = client.get("/api/v1/config/revisions/2").json()
+    assert [a["id"] for a in past["anchors"]] == ["0x0105"]
+
+
+def test_bulk_replace_records_survey_source(client: TestClient) -> None:
+    response = client.post("/api/v1/anchors:bulk", json={**BULK_BODY, "source": "survey"})
+    assert {a["source"] for a in response.json()["anchors"]} == {"survey"}
+
+
+def _with_anchors(*anchors: dict[str, object]) -> dict[str, object]:
+    return {"anchors": list(anchors)}
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        # 表記が違っても同じ ID なら重複
+        _with_anchors({"id": "0x0100", "x": 0, "y": 0, "z": 0}, {"id": "256", "x": 1, "y": 0, "z": 0}),
+        _with_anchors({"id": "0x0100", "x": 0, "y": 0}),
+        _with_anchors({"id": "0x00FF", "x": 0, "y": 0, "z": 0}),
+        _with_anchors({"id": "beef", "x": 0, "y": 0, "z": 0}),
+        _with_anchors({"id": 256, "x": 0, "y": 0, "z": 0}),
+        _with_anchors({"id": "0x0100", "x": 1e9, "y": 0, "z": 0}),
+        _with_anchors({"id": "0x0100", "x": 0, "y": 0, "z": 0, "x_mm": 0}),
+        _with_anchors(),
+        {**BULK_BODY, "source": "guess"},
+        {**BULK_BODY, "rev": 3},
+    ],
+)
+def test_bulk_replace_rejects_invalid_body_without_changes(
+    client: TestClient, body: dict[str, object]
+) -> None:
+    client.put("/api/v1/anchors/0x0100", json=ANCHOR_BODY)
+    before = client.get("/api/v1/anchors").json()
+
+    response = client.post("/api/v1/anchors:bulk", json=body)
+    assert response.status_code == 422
+    assert client.get("/api/v1/anchors").json() == before
+
+
+def test_bulk_replace_requires_token_when_configured(token_client: TestClient) -> None:
+    assert token_client.post("/api/v1/anchors:bulk", json=BULK_BODY).status_code == 401
+    ok = token_client.post("/api/v1/anchors:bulk", json=BULK_BODY, headers={"X-Auth-Token": "s3cret"})
+    assert ok.status_code == 200
 
 
 HELLO_BODY = {"tag_id": 1, "boot_id": 2863311530, "fw_version": "0.1.0-dev", "config_rev": 1}

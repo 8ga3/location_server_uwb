@@ -6,7 +6,7 @@ import sqlite3
 
 import pytest
 
-from location_server.store import AnchorNotFoundError, ConfigStore
+from location_server.store import AnchorNotFoundError, AnchorSpec, ConfigStore
 from location_server.units import ValueRangeError
 
 
@@ -123,3 +123,71 @@ def test_failed_transaction_leaves_no_partial_revision(store: ConfigStore, conn:
     for rev in revs:
         # すべてのリビジョンが読み出せる状態を保つ
         store.snapshot_at(rev)
+
+
+def _spec(anchor_id: int, x_mm: int, y_mm: int = 0, z_mm: int = 260, enabled: bool = True) -> AnchorSpec:
+    return AnchorSpec(anchor_id, f"anchor-{anchor_id:04X}", x_mm, y_mm, z_mm, enabled)
+
+
+def test_replace_anchors_bumps_revision_once(store: ConfigStore) -> None:
+    snapshot = store.replace_anchors([_spec(0x0100, 0), _spec(0x0101, 2300), _spec(0x0102, 2300, 1760)])
+    assert snapshot.meta.rev == 2
+    assert [a.id for a in snapshot.anchors] == [0x0100, 0x0101, 0x0102]
+    assert snapshot.meta.note == "アンカー 3 台を一括置換"
+    assert [a.id for a in store.snapshot_at(2).anchors] == [0x0100, 0x0101, 0x0102]
+
+
+def test_replace_anchors_removes_unlisted_but_keeps_history(store: ConfigStore) -> None:
+    _put(store, 0x0100, 0, 0, 1800)
+    _put(store, 0x0105, 9000, 0, 1800)
+    rev_before = store.current_meta().rev
+
+    snapshot = store.replace_anchors([_spec(0x0100, 10), _spec(0x0101, 2300)], note="room-1")
+    assert snapshot.meta.rev == rev_before + 1
+    assert snapshot.meta.note == "room-1"
+    assert [(a.id, a.x_mm) for a in store.list_anchors()] == [(0x0100, 10), (0x0101, 2300)]
+    # 削除したアンカーも、置換前のリビジョンからは復元できる
+    assert [a.id for a in store.snapshot_at(rev_before).anchors] == [0x0100, 0x0105]
+
+
+def test_replace_anchors_records_source(store: ConfigStore) -> None:
+    snapshot = store.replace_anchors([_spec(0x0100, 0)], source="survey")
+    assert [a.source for a in snapshot.anchors] == ["survey"]
+
+
+@pytest.mark.parametrize(
+    ("specs", "source"),
+    [
+        ([], "manual"),
+        ([_spec(0x0100, 0), _spec(0x0100, 1)], "manual"),
+        ([_spec(0x0100, 0), _spec(0x00FF, 1)], "manual"),
+        ([_spec(0x0100, 0)], "guess"),
+    ],
+)
+def test_replace_anchors_rejects_invalid_input_without_changes(
+    store: ConfigStore, specs: list[AnchorSpec], source: str
+) -> None:
+    _put(store, 0x0100, 0, 0, 1800)
+    before = store.current_snapshot()
+    with pytest.raises(ValueError):
+        store.replace_anchors(specs, source=source)
+    assert store.current_snapshot() == before
+
+
+def test_replace_anchors_rolls_back_on_write_failure(store: ConfigStore, conn: sqlite3.Connection) -> None:
+    _put(store, 0x0100, 0, 0, 1800)
+    _put(store, 0x0101, 5120, 0, 1800)
+    before = store.current_snapshot()
+
+    # 置換後のスナップショットの書き込みで失敗させ、削除と登録も巻き戻ることを確認する
+    conn.execute(
+        "CREATE TEMP TRIGGER tmp_block BEFORE INSERT ON config_anchor "
+        "BEGIN SELECT RAISE(ABORT, 'blocked'); END"
+    )
+    try:
+        with pytest.raises(sqlite3.IntegrityError):
+            store.replace_anchors([_spec(0x0100, 10), _spec(0x0102, 2300)])
+    finally:
+        conn.execute("DROP TRIGGER tmp_block")
+
+    assert store.current_snapshot() == before

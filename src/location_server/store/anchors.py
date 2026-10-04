@@ -9,11 +9,12 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+from collections.abc import Sequence
 from typing import NamedTuple
 
 from location_server.db import Transaction, utc_now_text
-from location_server.models import ANCHOR_SOURCE_MANUAL, Anchor, ConfigMeta, ConfigSnapshot
-from location_server.units import check_anchor_id
+from location_server.models import ANCHOR_SOURCE_MANUAL, ANCHOR_SOURCES, Anchor, ConfigMeta, ConfigSnapshot
+from location_server.units import check_anchor_id, format_hex_id
 
 
 class AnchorNotFoundError(LookupError):
@@ -26,6 +27,17 @@ class AnchorUpdate(NamedTuple):
     anchor: Anchor
     snapshot: ConfigSnapshot
     created: bool
+
+
+class AnchorSpec(NamedTuple):
+    """一括置換で登録するアンカー 1 台の内容。座標は整数ミリメートル。"""
+
+    id: int
+    label: str | None
+    x_mm: int
+    y_mm: int
+    z_mm: int
+    enabled: bool
 
 
 class ConfigStore:
@@ -138,6 +150,47 @@ class ConfigStore:
         return AnchorUpdate(
             anchor=anchor, snapshot=ConfigSnapshot(meta=meta, anchors=anchors), created=created
         )
+
+    def replace_anchors(
+        self,
+        anchors: Sequence[AnchorSpec],
+        *,
+        source: str = ANCHOR_SOURCE_MANUAL,
+        note: str | None = None,
+    ) -> ConfigSnapshot:
+        """アンカー表を `anchors` の内容で丸ごと置き換え、新しい構成を返す。
+
+        `anchors` に含まれないアンカーは `anchor` 表から削除する。過去の座標は `config_anchor` に
+        残るので、削除しても以前のリビジョンは復元できる。何台を書き換えても `rev` は 1 つだけ進み、
+        検証に失敗した場合は何も書き換えない。
+        """
+        if not anchors:
+            raise ValueError("アンカーを 1 台以上指定してください")
+        if source not in ANCHOR_SOURCES:
+            raise ValueError(f"source は {', '.join(ANCHOR_SOURCES)} のいずれかです: {source!r}")
+        seen: set[int] = set()
+        for spec in anchors:
+            check_anchor_id(spec.id)
+            if spec.id in seen:
+                raise ValueError(f"アンカー ID が重複しています: {format_hex_id(spec.id)}")
+            seen.add(spec.id)
+
+        now = utc_now_text()
+        change_note = note if note is not None else f"アンカー {len(anchors)} 台を一括置換"
+        with self._lock, self._transaction():
+            # anchor 表は現在値だけを持つので、全行を消してから入れ直せば置換になる
+            self._conn.execute("DELETE FROM anchor")
+            self._conn.executemany(
+                """
+                INSERT INTO anchor (id, label, x_mm, y_mm, z_mm, enabled, source, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [(s.id, s.label, s.x_mm, s.y_mm, s.z_mm, int(s.enabled), source, now) for s in anchors],
+            )
+            meta = self._append_revision(note=change_note, created_at=now)
+            current = self._list_anchors()
+            self._write_snapshot(meta.rev, current)
+        return ConfigSnapshot(meta=meta, anchors=current)
 
     def put_telemetry(
         self,
