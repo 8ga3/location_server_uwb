@@ -36,8 +36,10 @@ function positionStats(xs, ys, steps) {
 }
 
 // fix の from..to (両端を含む) の範囲で指標を求める。対象のサイクルが無ければ null を返す。
-// 返す値の長さはメートル。pairs は跳びを数えた隣り合うサイクルの組の数で、間引いたデータでは 0 になる
-export function filterMetrics(fix, from, to) {
+// 返す値の長さはメートル。pairs は跳びを数えた隣り合うサイクルの組の数。
+// 間引いたデータには steps: false を渡し、跳びを数えない。参照 API は間引いても末尾の行を必ず残すので、
+// 最後の 2 行だけ seq が続くことがあり、その 1 組だけで範囲全体の跳びを出してしまうため
+export function filterMetrics(fix, from, to, { steps = true } = {}) {
   const lo = Math.max(0, from);
   const hi = Math.min(fix.t.length - 1, to);
   const ls = { x: [], y: [], steps: [] };
@@ -49,7 +51,7 @@ export function filterMetrics(fix, from, to) {
     rejected += fix.krej[i] ?? 0;
     if (fix.kok[i] && !fix.kupd[i]) predicted++;
     if (!(fix.ok[i] && fix.kok[i])) continue;
-    if (prev >= 0 && fix.seq[i] - fix.seq[prev] === 1) {
+    if (steps && prev >= 0 && fix.seq[i] - fix.seq[prev] === 1) {
       ls.steps.push(Math.hypot(fix.x[i] - fix.x[prev], fix.y[i] - fix.y[prev]));
       kf.steps.push(Math.hypot(fix.kx[i] - fix.kx[prev], fix.ky[i] - fix.ky[prev]));
     }

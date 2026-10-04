@@ -184,16 +184,16 @@ function rangeCell(ranges, id, tagZ) {
 }
 
 // フィルタの効果の表 (設計文書 8.4)。fix の from..to の範囲を、最小二乗とフィルタの同じサイクルどうしで比べる。
-// rangeText は範囲の説明で、注記の先頭に出す
-function renderFilterMetrics(from, to, rangeText) {
-  const m = filterMetrics(data.fix, from, to);
+// rangeText は範囲の説明で、注記の先頭に出す。decimated が真なら跳びは出さない (設計文書 8.4)
+function renderFilterMetrics(from, to, rangeText, decimated = false) {
+  const m = filterMetrics(data.fix, from, to, { steps: !decimated });
   const body = $("metrics-body");
   if (!m) {
     body.replaceChildren();
     $("metrics-note").textContent = `${rangeText}: 最小二乗とフィルタがどちらも有効なサイクルがありません`;
     return;
   }
-  const noSteps = m.pairs === 0 ? "-- (間引きあり)" : "--";
+  const noSteps = decimated ? "-- (間引きあり)" : "--";
   const fmtMm = (v) => (v === null ? noSteps : mm(v, 1));
   const fmtCount = (v) => (v === null ? noSteps : String(v));
   const row = (label, lsValue, kfValue, format) => {
@@ -217,7 +217,8 @@ function renderFilterMetrics(from, to, rangeText) {
   );
   $("metrics-note").textContent =
     `${rangeText}: 比較 ${m.compared} / ${m.cycles} サイクル、棄却した測距 ${m.rejected}、予測のみ ${m.predicted}。` +
-    "散らばりは静止している区間で見る";
+    "散らばりは静止している区間で見る" +
+    (decimated ? "。跳びは、グラフをドラッグして間引かれない範囲まで拡大すると出る" : "");
 }
 
 // ------------------------------------------------------------------ 描画
@@ -293,7 +294,8 @@ function render(now) {
     replay.chartsDirty = false;
     const to = lastIndexAtOrBefore(fix.t, replay.windowMax);
     const span = (replay.windowMax - replay.windowMin) / 1000;
-    renderFilterMetrics(from, to, `表示範囲 ${span.toFixed(1)} 秒`);
+    const decimated = (replay.decimation?.track.stride ?? 1) > 1;
+    renderFilterMetrics(from, to, `表示範囲 ${span.toFixed(1)} 秒`, decimated);
   }
   charts.setCursor(replay.cursorT);
   renderReplayAnchors();
