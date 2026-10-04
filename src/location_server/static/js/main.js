@@ -3,6 +3,7 @@
 
 import { TimeCharts } from "./charts.js";
 import { anchorColors } from "./colors.js";
+import { filterMetrics, JUMP_THRESHOLD_M, ratio } from "./filter_metrics.js";
 import { lampClass, liveIndicators } from "./indicators.js";
 import { lastIndexAtOrBefore, SessionData } from "./model.js";
 import { LiveSource, loadSessions, loadSummary, loadWindow } from "./sources.js";
@@ -182,6 +183,43 @@ function rangeCell(ranges, id, tagZ) {
   return [text];
 }
 
+// フィルタの効果の表 (設計文書 8.4)。fix の from..to の範囲を、最小二乗とフィルタの同じサイクルどうしで比べる。
+// rangeText は範囲の説明で、注記の先頭に出す
+function renderFilterMetrics(from, to, rangeText) {
+  const m = filterMetrics(data.fix, from, to);
+  const body = $("metrics-body");
+  if (!m) {
+    body.replaceChildren();
+    $("metrics-note").textContent = `${rangeText}: 最小二乗とフィルタがどちらも有効なサイクルがありません`;
+    return;
+  }
+  const noSteps = m.pairs === 0 ? "-- (間引きあり)" : "--";
+  const fmtMm = (v) => (v === null ? noSteps : mm(v, 1));
+  const fmtCount = (v) => (v === null ? noSteps : String(v));
+  const row = (label, lsValue, kfValue, format) => {
+    const tr = document.createElement("tr");
+    const r = ratio(kfValue, lsValue);
+    const cells = [label, format(lsValue), format(kfValue), r === null ? "--" : r.toFixed(2)];
+    cells.forEach((text, i) => {
+      const td = document.createElement("td");
+      td.textContent = text;
+      // 比は 1 より小さければフィルタのほうが小さい (良い)。誤差程度の差では色を付けない
+      if (i === 3 && r !== null) td.className = r < 0.9 ? "better" : r > 1.1 ? "worse" : "";
+      tr.append(td);
+    });
+    return tr;
+  };
+  body.replaceChildren(
+    row("散らばり RMS", m.ls.scatterRms, m.kf.scatterRms, fmtMm),
+    row("跳び RMS", m.ls.stepRms, m.kf.stepRms, fmtMm),
+    row("跳びの最大", m.ls.stepMax, m.kf.stepMax, fmtMm),
+    row(`${JUMP_THRESHOLD_M * 1000} mm を超える跳び`, m.ls.jumps, m.kf.jumps, fmtCount),
+  );
+  $("metrics-note").textContent =
+    `${rangeText}: 比較 ${m.compared} / ${m.cycles} サイクル、棄却した測距 ${m.rejected}、予測のみ ${m.predicted}。` +
+    "散らばりは静止している区間で見る";
+}
+
 // ------------------------------------------------------------------ 描画
 
 // XY 平面に描く軌跡の選択 (最小二乗 / フィルタ)
@@ -253,6 +291,9 @@ function render(now) {
   if (replay.chartsDirty) {
     charts.update(data, replay.windowMin, replay.windowMax);
     replay.chartsDirty = false;
+    const to = lastIndexAtOrBefore(fix.t, replay.windowMax);
+    const span = (replay.windowMax - replay.windowMin) / 1000;
+    renderFilterMetrics(from, to, `表示範囲 ${span.toFixed(1)} 秒`);
   }
   charts.setCursor(replay.cursorT);
   renderReplayAnchors();
@@ -321,8 +362,13 @@ function renderLiveSummary() {
     ["σ 平均 (1 秒)", ind ? mm(ind.kfSigmaMean, 1) : "--"],
     ["間引き (フレーム)", String(state.live.lostTotal), state.live.lostTotal > 0],
   ]);
-  const ranges = data.rangesAtIndex(data.fix.t.length - 1);
-  const tagZ = tagHeightAt(data, data.fix.t.length - 1);
+  const n = data.fix.t.length;
+  const windowMs = Number($("metrics-window").value);
+  const last = data.lastT();
+  const metricsFrom = last === null ? 0 : lastIndexAtOrBefore(data.fix.t, last - windowMs) + 1;
+  renderFilterMetrics(metricsFrom, n - 1, `直近 ${windowMs / 1000} 秒`);
+  const ranges = data.rangesAtIndex(n - 1);
+  const tagZ = tagHeightAt(data, n - 1);
   renderAnchorTable(
     ["アンカー", "直近 1 秒", "距離"],
     data.anchorIds().map((id) => {
@@ -446,6 +492,7 @@ function startLive(tagId) {
   data.clear();
   data.setAnchors([], null);
   $("tag-field").hidden = false;
+  $("metrics-window-field").hidden = false;
   $("live-controls").hidden = false;
   $("replay-controls").hidden = true;
   $("source").value = "live";
@@ -535,6 +582,7 @@ async function openReplay(sessionId) {
   live.close();
   onStatus("", "再生");
   $("tag-field").hidden = true;
+  $("metrics-window-field").hidden = true;
   $("live-controls").hidden = true;
   $("replay-controls").hidden = false;
   history.replaceState(null, "", `#session=${sessionId}`);
@@ -547,7 +595,8 @@ async function openReplay(sessionId) {
   data.clear();
   data.setAnchors([], null);
   $("summary-title").textContent = `再生: セッション #${sessionId} (読み込み中)`;
-  for (const id of ["summary", "cursor-info", "anchor-head", "anchor-body"]) $(id).replaceChildren();
+  for (const id of ["summary", "cursor-info", "anchor-head", "anchor-body", "metrics-body"]) $(id).replaceChildren();
+  $("metrics-note").textContent = "";
   $("slider-label").textContent = "";
   state.dirty = true;
   try {
@@ -756,6 +805,10 @@ $("pause").addEventListener("click", () => {
   $("pause").setAttribute("aria-pressed", String(state.live.paused));
   state.dirty = true;
   updateLiveStatus();
+});
+
+$("metrics-window").addEventListener("change", () => {
+  state.summaryPending = true;
 });
 
 for (const id of ["fit-trail", "show-ls", "show-filter"]) {

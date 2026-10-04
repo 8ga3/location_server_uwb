@@ -45,6 +45,21 @@
       <thead><tr id="anchor-head"></tr></thead>
       <tbody id="anchor-body"></tbody>
     </table>
+    <div class="subhead">
+      <h3>フィルタの効果</h3>
+      <label id="metrics-window-field" class="check">範囲
+        <select id="metrics-window" aria-label="フィルタの効果を集計する範囲">
+          <option value="5000">直近 5 秒</option>
+          <option value="10000" selected>直近 10 秒</option>
+          <option value="30000">直近 30 秒</option>
+        </select>
+      </label>
+    </div>
+    <table class="anchors metrics">
+      <thead><tr><th>指標</th><th>最小二乗</th><th>フィルタ</th><th>比</th></tr></thead>
+      <tbody id="metrics-body"></tbody>
+    </table>
+    <p id="metrics-note" class="note"></p>
     <h3>選択時刻</h3>
     <dl id="cursor-info" class="stats"></dl>
   </section>
