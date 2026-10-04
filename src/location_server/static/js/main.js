@@ -3,7 +3,7 @@
 
 import { TimeCharts } from "./charts.js";
 import { anchorColors } from "./colors.js";
-import { filterMetrics, JUMP_THRESHOLD_M, ratio } from "./filter_metrics.js";
+import { filterMetrics, JUMP_THRESHOLD_MM, ratio } from "./filter_metrics.js";
 import { lampClass, liveIndicators } from "./indicators.js";
 import { lastIndexAtOrBefore, SessionData } from "./model.js";
 import { LiveSource, loadSessions, loadSummary, loadWindow } from "./sources.js";
@@ -215,7 +215,7 @@ function renderFilterMetrics(from, to, rangeText, stride = 1) {
     row("散らばり RMS", m.ls.scatterRms, m.kf.scatterRms, fmtMm),
     row("跳び RMS", m.ls.stepRms, m.kf.stepRms, fmtMm),
     row("跳びの最大", m.ls.stepMax, m.kf.stepMax, fmtMm),
-    row(`${JUMP_THRESHOLD_M * 1000} mm を超える跳び`, m.ls.jumps, m.kf.jumps, fmtCount),
+    row(`${JUMP_THRESHOLD_MM} mm を超える跳び`, m.ls.jumps, m.kf.jumps, fmtCount),
   );
   // 間引いたデータでは、間で省かれた行の棄却や予測は数えられない。範囲全体の件数と取り違えないよう書き分ける
   const counts = decimated
@@ -300,7 +300,10 @@ function render(now) {
     replay.chartsDirty = false;
     const to = lastIndexAtOrBefore(fix.t, replay.windowMax);
     const span = (replay.windowMax - replay.windowMin) / 1000;
-    renderFilterMetrics(from, to, `表示範囲 ${span.toFixed(1)} 秒`, replay.decimation?.track.stride ?? 1);
+    // ズームの境界は小数のミリ秒になる。軌跡の描画用の from (windowMin - 1 から求める) は境界の直前の
+    // サイクルを含みうるので、集計には windowMin 以上 (整数ミリ秒に切り上げ) のサイクルだけを使う
+    const metricsFrom = lastIndexAtOrBefore(fix.t, Math.ceil(replay.windowMin) - 1) + 1;
+    renderFilterMetrics(metricsFrom, to, `表示範囲 ${span.toFixed(1)} 秒`, replay.decimation?.track.stride ?? 1);
   }
   charts.setCursor(replay.cursorT);
   renderReplayAnchors();

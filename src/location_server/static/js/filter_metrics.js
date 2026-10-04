@@ -1,9 +1,18 @@
 // フィルタの効果の指標 (設計文書 8.4)。最小二乗の解とフィルタ後の位置を、どちらも有効なサイクルどうしで比べる。
 // tools/filter_compare.py も同じ定義で計算するので、定義を変えるときは両方を揃える。
 
-// 跳びとして数えるしきい値 [m]
-export const JUMP_THRESHOLD_M = 0.05;
+// 跳びとして数えるしきい値 [mm]。座標はタグが整数ミリメートルで送るので、跳びの判定も整数ミリメートルの差で行う。
+// メートルの浮動小数のまま比べると、ちょうど 50 mm の移動が丸め誤差で 50 mm を超えたと数えられる
+export const JUMP_THRESHOLD_MM = 50;
 
+// サイクル p から i への水平の移動量の 2 乗 [mm^2]。API のメートルを整数ミリメートルへ戻してから差を取る
+function stepSqMm(xs, ys, i, p) {
+  const dx = Math.round(xs[i] * 1000) - Math.round(xs[p] * 1000);
+  const dy = Math.round(ys[i] * 1000) - Math.round(ys[p] * 1000);
+  return dx * dx + dy * dy;
+}
+
+// steps は跳びの 2 乗 [mm^2] の列。返す長さはメートル
 function positionStats(xs, ys, steps) {
   const n = xs.length;
   if (n === 0) return null;
@@ -18,19 +27,19 @@ function positionStats(xs, ys, steps) {
   let sq = 0;
   for (let i = 0; i < n; i++) sq += (xs[i] - mx) ** 2 + (ys[i] - my) ** 2;
   let stepSq = 0;
-  let stepMax = null;
+  let stepMaxSq = null;
   let jumps = 0;
   for (const s of steps) {
-    stepSq += s * s;
-    if (stepMax === null || s > stepMax) stepMax = s;
-    if (s > JUMP_THRESHOLD_M) jumps++;
+    stepSq += s;
+    if (stepMaxSq === null || s > stepMaxSq) stepMaxSq = s;
+    if (s > JUMP_THRESHOLD_MM * JUMP_THRESHOLD_MM) jumps++;
   }
   return {
     meanX: mx,
     meanY: my,
     scatterRms: Math.sqrt(sq / n),
-    stepRms: steps.length > 0 ? Math.sqrt(stepSq / steps.length) : null,
-    stepMax,
+    stepRms: steps.length > 0 ? Math.sqrt(stepSq / steps.length) / 1000 : null,
+    stepMax: stepMaxSq === null ? null : Math.sqrt(stepMaxSq) / 1000,
     jumps: steps.length > 0 ? jumps : null,
   };
 }
@@ -52,8 +61,8 @@ export function filterMetrics(fix, from, to, { steps = true } = {}) {
     if (fix.kok[i] && !fix.kupd[i]) predicted++;
     if (!(fix.ok[i] && fix.kok[i])) continue;
     if (steps && prev >= 0 && fix.seq[i] - fix.seq[prev] === 1) {
-      ls.steps.push(Math.hypot(fix.x[i] - fix.x[prev], fix.y[i] - fix.y[prev]));
-      kf.steps.push(Math.hypot(fix.kx[i] - fix.kx[prev], fix.ky[i] - fix.ky[prev]));
+      ls.steps.push(stepSqMm(fix.x, fix.y, i, prev));
+      kf.steps.push(stepSqMm(fix.kx, fix.ky, i, prev));
     }
     ls.x.push(fix.x[i]);
     ls.y.push(fix.y[i]);
