@@ -184,8 +184,10 @@ function rangeCell(ranges, id, tagZ) {
 }
 
 // フィルタの効果の表 (設計文書 8.4)。fix の from..to の範囲を、最小二乗とフィルタの同じサイクルどうしで比べる。
-// rangeText は範囲の説明で、注記の先頭に出す。decimated が真なら跳びは出さない (設計文書 8.4)
-function renderFilterMetrics(from, to, rangeText, decimated = false) {
+// rangeText は範囲の説明で、注記の先頭に出す。stride は表示データの間引き間隔 (1 なら間引きなし)。
+// 間引かれていれば跳びは出さず (設計文書 8.4)、件数は残った行だけで数えた値だと注記する
+function renderFilterMetrics(from, to, rangeText, stride = 1) {
+  const decimated = stride > 1;
   const m = filterMetrics(data.fix, from, to, { steps: !decimated });
   const body = $("metrics-body");
   if (!m) {
@@ -215,10 +217,14 @@ function renderFilterMetrics(from, to, rangeText, decimated = false) {
     row("跳びの最大", m.ls.stepMax, m.kf.stepMax, fmtMm),
     row(`${JUMP_THRESHOLD_M * 1000} mm を超える跳び`, m.ls.jumps, m.kf.jumps, fmtCount),
   );
+  // 間引いたデータでは、間で省かれた行の棄却や予測は数えられない。範囲全体の件数と取り違えないよう書き分ける
+  const counts = decimated
+    ? `間引いた表示データ (1/${stride}) の ${m.cycles} 行だけで数えると、比較 ${m.compared} 行、` +
+      `棄却した測距 ${m.rejected}、予測のみ ${m.predicted} (範囲全体の件数ではない)`
+    : `比較 ${m.compared} / ${m.cycles} サイクル、棄却した測距 ${m.rejected}、予測のみ ${m.predicted}`;
   $("metrics-note").textContent =
-    `${rangeText}: 比較 ${m.compared} / ${m.cycles} サイクル、棄却した測距 ${m.rejected}、予測のみ ${m.predicted}。` +
-    "散らばりは静止している区間で見る" +
-    (decimated ? "。跳びは、グラフをドラッグして間引かれない範囲まで拡大すると出る" : "");
+    `${rangeText}: ${counts}。散らばりは静止している区間で見る` +
+    (decimated ? "。跳びと正確な件数は、グラフをドラッグして間引かれない範囲まで拡大すると出る" : "");
 }
 
 // ------------------------------------------------------------------ 描画
@@ -294,8 +300,7 @@ function render(now) {
     replay.chartsDirty = false;
     const to = lastIndexAtOrBefore(fix.t, replay.windowMax);
     const span = (replay.windowMax - replay.windowMin) / 1000;
-    const decimated = (replay.decimation?.track.stride ?? 1) > 1;
-    renderFilterMetrics(from, to, `表示範囲 ${span.toFixed(1)} 秒`, decimated);
+    renderFilterMetrics(from, to, `表示範囲 ${span.toFixed(1)} 秒`, replay.decimation?.track.stride ?? 1);
   }
   charts.setCursor(replay.cursorT);
   renderReplayAnchors();
