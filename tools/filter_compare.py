@@ -413,8 +413,11 @@ def _window(value: str) -> float:
         number = float(value)
     except ValueError:
         raise argparse.ArgumentTypeError(f"数値を指定してください: {value}") from None
-    if not math.isfinite(number) or number < WINDOW_MIN_S:
-        raise argparse.ArgumentTypeError(f"{WINDOW_MIN_S} 以上の有限の値を指定してください: {value}")
+    # 上限は --from / --to と同じ。ミリ秒に直すときに整数へ丸められない値を、データを取る前に弾く
+    if not math.isfinite(number) or not WINDOW_MIN_S <= number <= SECONDS_ARG_MAX:
+        raise argparse.ArgumentTypeError(
+            f"{WINDOW_MIN_S} 以上 {SECONDS_ARG_MAX:g} 以下の値を指定してください: {value}"
+        )
     return number
 
 

@@ -172,7 +172,7 @@ def test_run_uses_latest_session_and_relative_range() -> None:
     assert "LS 散らばり" in text
 
 
-@pytest.mark.parametrize("value", ["0", "0.0005", "-1", "inf", "nan", "abc"])
+@pytest.mark.parametrize("value", ["0", "0.0005", "-1", "inf", "nan", "abc", "1e308", "1e10"])
 def test_window_rejects_values_that_cannot_make_a_window(value: str) -> None:
     # ミリ秒にして 1 未満になる値や有限でない値は、データを取りに行く前に引数エラーにする
     with pytest.raises(SystemExit):
@@ -246,3 +246,8 @@ def test_big_jumps_excludes_moves_equal_to_threshold() -> None:
 def test_from_and_to_must_be_finite(option: str, value: str) -> None:
     with pytest.raises(SystemExit):
         filter_compare.build_parser().parse_args([option, value])
+
+
+def test_window_accepts_upper_limit() -> None:
+    args = filter_compare.build_parser().parse_args(["--window", "1e9"])
+    assert args.window == pytest.approx(1e9)
