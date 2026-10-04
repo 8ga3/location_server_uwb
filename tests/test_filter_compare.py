@@ -112,7 +112,7 @@ def test_no_comparable_cycles() -> None:
 
 def test_big_jumps_lists_least_squares_jumps() -> None:
     fix = _fix([0.0, 0.4, 0.41], [0.0] * 3, [0.0, 0.02, 0.03], [0.0] * 3, krej=[0, 1, 0])
-    jumps = filter_compare.big_jumps(fix, 0.2, fix["t"][0])
+    jumps = filter_compare.big_jumps(fix, 200, fix["t"][0])
     assert len(jumps) == 1
     assert jumps[0].seq == 1
     assert jumps[0].ls_step == pytest.approx(0.4)
@@ -213,7 +213,7 @@ def test_jump_times_keep_milliseconds() -> None:
     # 30 Hz の記録では 2.033 s のような時刻になる。0.1 s に丸めると --from / --to に渡したときにずれる
     fix = _fix([0.0, 0.4], [0.0] * 2, [0.0] * 2, [0.0] * 2)
     fix["t"] = [1000, 3033]
-    lines = filter_compare.format_jumps(filter_compare.big_jumps(fix, 0.2, 1000), 0.2)
+    lines = filter_compare.format_jumps(filter_compare.big_jumps(fix, 200, 1000), 200)
     assert "2.033 s" in lines[1]
 
 
@@ -223,3 +223,26 @@ def test_window_table_states_units() -> None:
     note = filter_compare.format_windows(fix, 1.0, fix["t"][0])[-1]
     assert "平均 x / y はメートル" in note
     assert "ミリメートル" in note
+
+
+def test_jump_exactly_at_threshold_is_not_counted() -> None:
+    # 1.000 → 1.050 m はメートルの浮動小数で差を取ると 0.050000000000000044 になるが、
+    # 50 mm ちょうどなので数えない
+    fix = _fix([1.000, 1.050, 1.101], [0.0] * 3, [0.0] * 3, [0.0] * 3)
+    m = filter_compare.filter_metrics(fix, 0, 2)
+    assert m is not None
+    assert m.ls.jumps == 1  # 1.050 → 1.101 の 51 mm だけ
+    assert m.ls.step_max == pytest.approx(0.051)
+
+
+def test_big_jumps_excludes_moves_equal_to_threshold() -> None:
+    fix = _fix([2.300, 2.500, 2.701], [0.0] * 3, [0.0] * 3, [0.0] * 3)
+    jumps = filter_compare.big_jumps(fix, 200, fix["t"][0])
+    assert [j.seq for j in jumps] == [2]
+
+
+@pytest.mark.parametrize("option", ["--from", "--to"])
+@pytest.mark.parametrize("value", ["nan", "inf", "-inf", "1e300", "abc"])
+def test_from_and_to_must_be_finite(option: str, value: str) -> None:
+    with pytest.raises(SystemExit):
+        filter_compare.build_parser().parse_args([option, value])

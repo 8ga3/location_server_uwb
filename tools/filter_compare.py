@@ -36,7 +36,9 @@ DEFAULT_SERVER = "http://127.0.0.1:8000"
 TIMEOUT_SEC = 30.0
 # 参照 API の max_points の上限。これを超える範囲は間引かれるので、分けて取り直す
 MAX_POINTS = 20_000
-JUMP_THRESHOLD_M = 0.05
+# 跳びとして数えるしきい値 [mm]。座標はタグが整数ミリメートルで送るので、跳びの判定も整数ミリメートルの
+# 差で行う。メートルの浮動小数のまま比べると、ちょうど 50 mm の移動が丸め誤差で 50 mm を超えたと数えられる
+JUMP_THRESHOLD_MM = 50
 DEFAULT_LIST_JUMP_MM = 200.0
 
 Fix = dict[str, list[Any]]
@@ -88,7 +90,20 @@ class FilterMetrics:
     kf: PositionStats
 
 
-def _position_stats(xs: list[float], ys: list[float], steps: list[float]) -> PositionStats:
+def _to_mm(meters: float) -> int:
+    """API が返すメートルを、タグが送った整数ミリメートルへ戻す。"""
+    return round(meters * 1000)
+
+
+def _step_sq_mm(fix: Fix, xk: str, yk: str, i: int, p: int) -> int:
+    """サイクル p から i への水平の移動量の 2 乗 [mm^2]。整数ミリメートルの差から求める。"""
+    dx = _to_mm(fix[xk][i]) - _to_mm(fix[xk][p])
+    dy = _to_mm(fix[yk][i]) - _to_mm(fix[yk][p])
+    return dx * dx + dy * dy
+
+
+def _position_stats(xs: list[float], ys: list[float], steps: list[int]) -> PositionStats:
+    """`steps` は跳びの 2 乗 [mm^2] の列。"""
     n = len(xs)
     mean_x = sum(xs) / n
     mean_y = sum(ys) / n
@@ -99,9 +114,9 @@ def _position_stats(xs: list[float], ys: list[float], steps: list[float]) -> Pos
         mean_x,
         mean_y,
         scatter,
-        math.sqrt(sum(s * s for s in steps) / len(steps)),
-        max(steps),
-        sum(1 for s in steps if s > JUMP_THRESHOLD_M),
+        math.sqrt(sum(steps) / len(steps)) / 1000,
+        math.sqrt(max(steps)) / 1000,
+        sum(1 for s in steps if s > JUMP_THRESHOLD_MM * JUMP_THRESHOLD_MM),
     )
 
 
@@ -113,8 +128,8 @@ def filter_metrics(fix: Fix, lo: int, hi: int) -> FilterMetrics | None:
     ls_y: list[float] = []
     kf_x: list[float] = []
     kf_y: list[float] = []
-    ls_steps: list[float] = []
-    kf_steps: list[float] = []
+    ls_steps: list[int] = []
+    kf_steps: list[int] = []
     rejected = 0
     predicted = 0
     prev = -1
@@ -125,8 +140,8 @@ def filter_metrics(fix: Fix, lo: int, hi: int) -> FilterMetrics | None:
         if not (fix["ok"][i] and fix["kok"][i]):
             continue
         if prev >= 0 and fix["seq"][i] - fix["seq"][prev] == 1:
-            ls_steps.append(math.hypot(fix["x"][i] - fix["x"][prev], fix["y"][i] - fix["y"][prev]))
-            kf_steps.append(math.hypot(fix["kx"][i] - fix["kx"][prev], fix["ky"][i] - fix["ky"][prev]))
+            ls_steps.append(_step_sq_mm(fix, "x", "y", i, prev))
+            kf_steps.append(_step_sq_mm(fix, "kx", "ky", i, prev))
         ls_x.append(fix["x"][i])
         ls_y.append(fix["y"][i])
         kf_x.append(fix["kx"][i])
@@ -157,8 +172,10 @@ class Jump:
     rejected: int | None
 
 
-def big_jumps(fix: Fix, threshold_m: float, origin_ms: int) -> list[Jump]:
-    """隣り合うサイクルで最小二乗の解が `threshold_m` を超えて跳んだ箇所と、そのときのフィルタの動き。
+def big_jumps(fix: Fix, threshold_mm: float, origin_ms: int) -> list[Jump]:
+    """隣り合うサイクルで最小二乗の解が `threshold_mm` を超えて跳んだ箇所と、そのときのフィルタの動き。
+
+    跳びは整数ミリメートルの差から求めるので、しきい値とちょうど同じ移動は含めない。
 
     時刻は `origin_ms` (セッションの最初のサイクルの時刻) からの秒数にする。`--from` で範囲を絞っても、
     表示した時刻をそのまま `--from` / `--to` に渡せるようにするためである。
@@ -170,10 +187,11 @@ def big_jumps(fix: Fix, threshold_m: float, origin_ms: int) -> list[Jump]:
             continue
         if not (fix["ok"][i] and fix["kok"][i] and fix["ok"][p] and fix["kok"][p]):
             continue
-        step = math.hypot(fix["x"][i] - fix["x"][p], fix["y"][i] - fix["y"][p])
-        if step <= threshold_m:
+        step_sq = _step_sq_mm(fix, "x", "y", i, p)
+        if step_sq <= threshold_mm * threshold_mm:
             continue
-        kf_step = math.hypot(fix["kx"][i] - fix["kx"][p], fix["ky"][i] - fix["ky"][p])
+        step = math.sqrt(step_sq) / 1000
+        kf_step = math.sqrt(_step_sq_mm(fix, "kx", "ky", i, p)) / 1000
         jumps.append(
             Jump(
                 (fix["t"][i] - origin_ms) / 1000,
@@ -247,7 +265,7 @@ def format_metrics(metrics: FilterMetrics) -> list[str]:
         ("跳び RMS", _mm(ls.step_rms), _mm(kf.step_rms), _ratio(kf.step_rms, ls.step_rms)),
         ("跳びの最大", _mm(ls.step_max), _mm(kf.step_max), _ratio(kf.step_max, ls.step_max)),
         (
-            f"{JUMP_THRESHOLD_M * 1000:.0f} mm を超える跳び",
+            f"{JUMP_THRESHOLD_MM} mm を超える跳び",
             "--" if ls.jumps is None else str(ls.jumps),
             "--" if kf.jumps is None else str(kf.jumps),
             "--" if ls.jumps is None or kf.jumps is None else _ratio(float(kf.jumps), float(ls.jumps)),
@@ -327,8 +345,8 @@ def _num_mm(value: float | None) -> str:
     return "--" if value is None else f"{value * 1000:.1f}"
 
 
-def format_jumps(jumps: list[Jump], threshold_m: float) -> list[str]:
-    lines = [f"最小二乗の解が {threshold_m * 1000:.0f} mm を超えて跳んだサイクル: {len(jumps)} 件"]
+def format_jumps(jumps: list[Jump], threshold_mm: float) -> list[str]:
+    lines = [f"最小二乗の解が {threshold_mm:g} mm を超えて跳んだサイクル: {len(jumps)} 件"]
     for j in jumps:
         resid = "--" if j.resid is None else f"{j.resid * 1000:.0f}"
         rejected = "--" if j.rejected is None else str(j.rejected)
@@ -367,13 +385,27 @@ def run(args: argparse.Namespace, fetch: Fetch) -> list[str]:
     if args.window is not None:
         lines += ["", *format_windows(fix, args.window, first_t)]
     if args.list_jump_mm > 0:
-        threshold_m = args.list_jump_mm / 1000
-        lines += ["", *format_jumps(big_jumps(fix, threshold_m, first_t), threshold_m)]
+        lines += ["", *format_jumps(big_jumps(fix, args.list_jump_mm, first_t), args.list_jump_mm)]
     return lines
 
 
 # --window の下限 [s]。区間の境界はミリ秒で数えるので、これより短いと区間の長さが 0 になる
 WINDOW_MIN_S = 0.001
+
+
+# --from / --to の絶対値の上限 [s]。1 セッションの長さはこれを大きく下回る。有限でも、ミリ秒に直したときに
+# 整数へ丸められないほど大きな値を、データを取りに行く前の引数の段階で弾くために置く
+SECONDS_ARG_MAX = 1e9
+
+
+def _seconds_arg(value: str) -> float:
+    try:
+        number = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"数値を指定してください: {value}") from None
+    if not math.isfinite(number) or abs(number) > SECONDS_ARG_MAX:
+        raise argparse.ArgumentTypeError(f"±{SECONDS_ARG_MAX:g} 秒以内の有限の値を指定してください: {value}")
+    return number
 
 
 def _window(value: str) -> float:
@@ -390,8 +422,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="タグ側フィルタの効果を最小二乗の解と比べる (設計文書 8.4)")
     parser.add_argument("session", nargs="?", type=int, help="セッション ID (省略すると最新のセッション)")
     parser.add_argument("--server", default=DEFAULT_SERVER, help=f"サーバーの URL (既定 {DEFAULT_SERVER})")
-    parser.add_argument("--from", dest="from_s", type=float, help="範囲の始まり [s] (最初のサイクルから)")
-    parser.add_argument("--to", dest="to_s", type=float, help="範囲の終わり [s] (最初のサイクルから)")
+    parser.add_argument(
+        "--from", dest="from_s", type=_seconds_arg, help="範囲の始まり [s] (最初のサイクルから)"
+    )
+    parser.add_argument("--to", dest="to_s", type=_seconds_arg, help="範囲の終わり [s] (最初のサイクルから)")
     parser.add_argument(
         "--window", type=_window, help=f"この秒数ごとの区間に区切った表も出す ({WINDOW_MIN_S} 以上)"
     )
