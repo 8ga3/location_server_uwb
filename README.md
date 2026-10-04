@@ -29,7 +29,7 @@ UWB 測位のデバッグ・精度評価に使うサーバーである。アン�
 | A | SQLite スキーマ、構成配信 API、アンカー管理 API、座標入力 CLI | 実装済み |
 | B | UDP によるテレメトリ収集、セッション開始通知、UDP ダンパ | 実装済み。実機で測定済み (AP 切断後に再接続する瞬間の周期のみ未確認) |
 | C | ライブ配信 (WebSocket)、参照 API、可視化ページ | 実装済み。実機のタグでライブ表示を確認済み (既知座標での静的試験と、走行中の遅延の測定は未実施) |
-| D | self-survey 連携 | 未着手 |
+| D | self-survey 連携 | アンカーの一括置換 API (`POST /api/v1/anchors:bulk`) のみ先行して実装済み |
 
 フェーズ A の「タグ側の Wi-Fi 取得 + NVS キャッシュ」と、フェーズ B の「タグ側のリングバッファと UDP 送信」
 「測距ループと Wi-Fi 監視のコア分離」はファームウェア側の作業であり、このリポジトリには含まれない。
@@ -105,6 +105,10 @@ uv run python tools/anchor_cli.py set 0x0101 --x 5.12 --y 0 --z 1.8
 uv run python tools/anchor_cli.py set 0x0102 --x 5.08 --y 4.31 --z 1.8
 uv run python tools/anchor_cli.py set 0x0103 --x 0.03 --y 4.29 --z 1.8
 
+# 座標表ファイル (JSON) の内容でアンカー表を丸ごと置き換える。ファイルに無いアンカーは削除される
+uv run python tools/anchor_cli.py apply anchors.json --dry-run   # 差分の表示だけ
+uv run python tools/anchor_cli.py apply anchors.json
+
 # 一覧を見る
 uv run python tools/anchor_cli.py list
 
@@ -114,6 +118,27 @@ uv run python tools/anchor_cli.py telemetry --host 192.168.1.10 --port 47100 --b
 # タグへ配られる構成を確認する
 uv run python tools/anchor_cli.py config
 ```
+
+`apply` は `POST /api/v1/anchors:bulk` を使い、何台を書き換えても構成リビジョン (`rev`) は 1 つだけ進む。
+送る前に現在の構成との差分 (`+` 追加、`-` 削除、`~` 変更) を表示し、差分が無ければ送らない。
+座標表ファイルは次の形式の JSON で書く。
+
+```json
+{
+  "note": "部屋 1",
+  "anchors": [
+    { "id": "0x0100", "x": 0.00, "y": 0.00, "z": 1.80, "label": "北西の柱" },
+    { "id": "0x0101", "x": 5.12, "y": 0.00, "z": 1.80 },
+    { "id": "0x0102", "x": 5.08, "y": 4.31, "z": 1.80 },
+    { "id": "0x0103", "x": 0.03, "y": 4.29, "z": 1.80, "enabled": false }
+  ]
+}
+```
+
+- `id`、`x`、`y`、`z` は必須。`id` は `0x0100` 形式または 10 進数の文字列、座標はメートルで書く
+- `label` と `enabled` (既定は `true`) は省略できる。`enabled` が `false` のアンカーはタグへ配られない
+- `note` は構成リビジョンに残すメモで、省略できる。`--note` を付けるとそちらが優先される
+- `source` に `survey` を書くと、登録したアンカーの `source` が `survey` になる (既定は `manual`)
 
 接続先は `--server` または環境変数 `UWB_SERVER_URL` で変えられる。
 `UWB_AUTH_TOKEN` を設定してサーバーを起動している場合は、CLI 側にも同じ環境変数か `--token` を与える。

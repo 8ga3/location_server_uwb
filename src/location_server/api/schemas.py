@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import ipaddress
-from typing import Annotated, Self
+from typing import Annotated, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -17,9 +17,11 @@ from location_server.units import (
     COORD_MM_MAX,
     TAG_ID_MAX,
     TAG_ID_MIN,
+    check_anchor_id,
     format_hex_id,
     meters_to_mm,
     mm_to_meters,
+    parse_hex_id,
 )
 
 # 1 パケットに詰めるサイクル数の上限。パケット形式の count (設計文書 6.2) の上限と一致させる
@@ -27,6 +29,9 @@ BATCH_CYCLES_MAX = PACKET_COUNT_MAX
 UDP_PORT_MAX = 65535
 BOOT_ID_MAX = 0xFFFFFFFF
 FW_VERSION_MAX_LEN = 64
+# 一括置換で一度に渡せるアンカーの台数。パケットの anchor_n (1 バイト) で表せる台数に合わせる
+BULK_ANCHORS_MAX = 255
+CONFIG_NOTE_MAX_LEN = 200
 
 Meters = Annotated[float, Field(ge=-COORD_MM_MAX / 1000, le=COORD_MM_MAX / 1000)]
 
@@ -44,6 +49,42 @@ class AnchorPut(BaseModel):
 
     def to_mm(self) -> tuple[int, int, int]:
         return meters_to_mm(self.x), meters_to_mm(self.y), meters_to_mm(self.z)
+
+
+class AnchorBulkItem(AnchorPut):
+    """`POST /api/v1/anchors:bulk` の本文に並べるアンカー 1 台。`id` は `0x0100` 形式か 10 進数表記。"""
+
+    id: str
+
+    @field_validator("id")
+    @classmethod
+    def _check_id(cls, value: str) -> str:
+        check_anchor_id(parse_hex_id(value))
+        return value
+
+    @property
+    def anchor_id(self) -> int:
+        return parse_hex_id(self.id)
+
+
+class AnchorBulkIn(BaseModel):
+    """`POST /api/v1/anchors:bulk` の本文。ここに無いアンカーは削除される。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    anchors: list[AnchorBulkItem] = Field(min_length=1, max_length=BULK_ANCHORS_MAX)
+    source: Literal["manual", "survey"] = "manual"
+    note: Annotated[str, Field(max_length=CONFIG_NOTE_MAX_LEN)] | None = None
+
+    @model_validator(mode="after")
+    def _check_unique_ids(self) -> Self:
+        # "0x0100" と "256" のように表記が違っても同じ ID なら重複とみなす
+        seen: set[int] = set()
+        for item in self.anchors:
+            if item.anchor_id in seen:
+                raise ValueError(f"アンカー ID が重複しています: {format_hex_id(item.anchor_id)}")
+            seen.add(item.anchor_id)
+        return self
 
 
 class TelemetryPut(BaseModel):

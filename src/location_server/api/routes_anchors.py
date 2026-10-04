@@ -10,7 +10,14 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 
 from location_server.api.auth import require_write_token
 from location_server.api.deps import get_store, parse_anchor_id_param
-from location_server.api.schemas import AnchorListOut, AnchorPut, AnchorPutOut, to_anchor_out
+from location_server.api.schemas import (
+    AnchorBulkIn,
+    AnchorListOut,
+    AnchorPut,
+    AnchorPutOut,
+    to_anchor_out,
+)
+from location_server.store import AnchorSpec
 
 router = APIRouter(prefix="/api/v1", tags=["anchors"])
 
@@ -48,3 +55,22 @@ def put_anchor(request: Request, response: Response, anchor_id: str, body: Ancho
         response.status_code = status.HTTP_201_CREATED
     response.headers["ETag"] = result.snapshot.etag
     return AnchorPutOut(rev=result.snapshot.meta.rev, anchor=to_anchor_out(result.anchor))
+
+
+@router.post("/anchors:bulk", response_model=AnchorListOut, dependencies=[Depends(require_write_token)])
+def replace_anchors(request: Request, response: Response, body: AnchorBulkIn) -> AnchorListOut:
+    """アンカー表を本文の内容で丸ごと置き換える。何台あっても `rev` は 1 つだけ進む。
+
+    本文に無いアンカーは削除される。検証に失敗した場合は何も書き換えない。
+    """
+    try:
+        specs = [AnchorSpec(item.anchor_id, item.label, *item.to_mm(), item.enabled) for item in body.anchors]
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    snapshot = get_store(request).replace_anchors(specs, source=body.source, note=body.note)
+    response.headers["ETag"] = snapshot.etag
+    return AnchorListOut(
+        rev=snapshot.meta.rev,
+        anchors=[to_anchor_out(anchor) for anchor in snapshot.anchors],
+    )
