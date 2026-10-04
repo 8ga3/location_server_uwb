@@ -52,7 +52,7 @@ const state = {
 
 const xy = new XYPlot($("xy"));
 const charts = new TimeCharts(
-  { range: $("chart-range"), period: $("chart-period"), quality: $("chart-quality") },
+  { range: $("chart-range"), period: $("chart-period"), quality: $("chart-quality"), count: $("chart-count") },
   { onPick, onZoom, onReset },
 );
 const live = new LiveSource({ onFrame, onStatus });

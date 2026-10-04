@@ -1,5 +1,5 @@
-// 時系列グラフ (uPlot)。距離 (アンカーごと)、周期時間、測位の品質 (残差・使用アンカー数・フィルタの σ と
-// 棄却数) の 3 枚を縦に並べる。
+// 時系列グラフ (uPlot)。距離 (アンカーごと)、周期時間、残差とフィルタの σ、測距の本数 (最小二乗に使った数・
+// フィルタが取り込んだ数・棄却した数) の 4 枚を縦に並べる。長さと本数は軸を分けると見やすいので別のグラフにする。
 // 横軸はタグの millis() を秒にしたもの。測距の失敗は null として線を切り、欠測として見せる。
 // uPlot は index.html で読み込む同梱ファイルが定義するグローバル変数を使う。
 
@@ -61,11 +61,12 @@ export class TimeCharts {
     // 周期はサーバーが間引く前に求めた値 (dt) を使う。間引いた再生データでも本来の周期が見える
     const periodData = [xs, fix.dt];
     const toMm = (v) => (v === null || v === undefined ? null : v * 1000);
-    const qualityData = [xs, fix.resid.map(toMm), fix.used, fix.ksig.map(toMm), fix.krej];
+    const qualityData = [xs, fix.resid.map(toMm), fix.ksig.map(toMm)];
+    const countData = [xs, fix.used, fix.kused, fix.krej];
 
     this._programmatic++;
     try {
-      const datasets = [rangeData, periodData, qualityData];
+      const datasets = [rangeData, periodData, qualityData, countData];
       this.charts.forEach((chart, i) => {
         chart.setData(datasets[i]);
         if (xMin !== null && xMax !== null && xMax > xMin) {
@@ -202,20 +203,11 @@ export class TimeCharts {
 
     const quality = new uPlot(
       base(
-        "残差・使用数・フィルタの σ",
+        "残差とフィルタの σ",
         HEIGHT_SMALL,
         [
           { label: "t [s]" },
           { label: "残差 [mm]", stroke: cssVar("--warn"), width: 1.5, spanGaps: false, points: { show: false } },
-          {
-            label: "使用数",
-            scale: "n",
-            stroke: muted,
-            width: 1,
-            spanGaps: false,
-            points: { show: false },
-            paths: uPlot.paths.stepped({ align: 1 }),
-          },
           {
             label: "フィルタ σ [mm]",
             stroke: cssVar("--filter"),
@@ -223,24 +215,50 @@ export class TimeCharts {
             spanGaps: false,
             points: { show: false },
           },
-          {
-            label: "棄却数",
-            scale: "n",
-            stroke: cssVar("--bad"),
-            width: 1,
-            spanGaps: false,
-            points: { show: false },
-            paths: uPlot.paths.stepped({ align: 1 }),
-          },
         ],
-        [xAxis, axis("[mm]"), axis("本数", { side: 1, scale: "n", incrs: [1, 2, 5], grid: { show: false } })],
-        { n: { range: (u, min, max) => [0, Math.max(4, max ?? 4) + 0.5] } },
+        [xAxis, axis("[mm]")],
       ),
-      [[], [], [], [], []],
+      [[], [], []],
       this.el.quality,
     );
 
-    this.charts = [range, period, quality];
+    // 本数は整数の階段で描く。縦軸は上下に 0.5 ずつ空け、0 本と最大の本数の線が枠や横軸と重ならないようにする
+    const stepped = (label, stroke, width, dash) => ({
+      label,
+      stroke,
+      width,
+      dash,
+      spanGaps: false,
+      points: { show: false },
+      paths: uPlot.paths.stepped({ align: 1 }),
+    });
+    // 目盛りは整数だけに置く。本数が多いときは 6 本前後になるよう間隔を広げる
+    const integerSplits = (u, axisIdx, min, max) => {
+      const step = Math.max(1, Math.ceil((max - min) / 6));
+      const splits = [];
+      // 本数は負にならない。下端の余白 (-0.5) から始めると Math.ceil が -0 を返し、目盛りに "-0" と出る
+      for (let v = Math.max(0, Math.ceil(min / step) * step); v <= max; v += step) splits.push(v);
+      return splits;
+    };
+    const count = new uPlot(
+      base(
+        "測距の本数",
+        HEIGHT_SMALL,
+        [
+          { label: "t [s]" },
+          // 最小二乗に使った数とフィルタが取り込んだ数は普段同じなので、太い実線の上に細い点線を重ねて両方を見せる
+          stepped("最小二乗に使用", muted, 4),
+          stepped("フィルタが取り込み", cssVar("--filter"), 1.5, [4, 3]),
+          stepped("フィルタが棄却", cssVar("--bad"), 1.5),
+        ],
+        [xAxis, axis("本数", { splits: integerSplits })],
+        { y: { range: (u, min, max) => [-0.5, Math.max(4, max ?? 4) + 0.5] } },
+      ),
+      [[], [], [], []],
+      this.el.count,
+    );
+
+    this.charts = [range, period, quality, count];
     if (this._lastArgs) this.update(...this._lastArgs);
   }
 }
