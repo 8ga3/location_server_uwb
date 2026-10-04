@@ -36,6 +36,8 @@ TIMEOUT_SEC = 10.0
 ANCHOR_ID_MIN = 0x0100
 ANCHOR_ID_MAX = 0xFFFE
 COORD_MM_MAX = 2**31 - 1
+COORD_M_MIN = -COORD_MM_MAX / 1000
+COORD_M_MAX = COORD_MM_MAX / 1000
 BULK_ANCHORS_MAX = 255
 CONFIG_NOTE_MAX_LEN = 200
 ANCHOR_SOURCES = ("manual", "survey")
@@ -239,7 +241,10 @@ def _check_document(document: Any) -> dict[str, Any]:
             raise InputError(f"アンカー ID が重複しています: 0x{anchor_id:04X}")
         seen.add(anchor_id)
         for key in ("x", "y", "z"):
-            if not -COORD_MM_MAX <= _mm(anchor[key]) <= COORD_MM_MAX:
+            # 型と有限性を確かめてから、サーバーの `Meters` と同じくメートル値のまま範囲を比べる。
+            # ミリメートルへ丸めてから比べると、2147483.6474 のように丸めで範囲内へ入る値を通してしまう
+            _mm(anchor[key])
+            if not COORD_M_MIN <= anchor[key] <= COORD_M_MAX:
                 raise InputError(f"{name} の {key} が扱える範囲を超えています: {anchor[key]!r}")
         if anchor.get("label") is not None and not isinstance(anchor["label"], str):
             raise InputError(f"{name} の label は文字列で書いてください: {anchor['label']!r}")
