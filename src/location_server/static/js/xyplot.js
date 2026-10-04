@@ -4,6 +4,10 @@
 
 import { cssVar, trailColor } from "./colors.js";
 
+// フィルタの軌跡の不透明度。古い点が MIN、最も新しい点が MAX。現在位置の菱形 (不透明) より常に薄くする
+const FILTER_TRAIL_ALPHA_MIN = 0.12;
+const FILTER_TRAIL_ALPHA_MAX = 0.5;
+
 // 目盛り幅を 1 / 2 / 5 × 10^n から選び、線の数を targetLines 前後に保つ。
 // 発散した解 (最大で約 2147 km) を表示範囲に含めても、線が数千本にならないようにする
 export function niceStep(span, targetLines) {
@@ -283,6 +287,7 @@ export class XYPlot {
   }
 
   // フィルタの軌跡。単色で、古い点ほど薄く描く。表示範囲外の点の数を返す。
+  // 現在位置の菱形と同じ色なので、軌跡は最も新しい点でも半透明に抑え、菱形を見分けやすくする。
   // フィルタの位置が無効なサイクル (kok が偽) では線を切る。予測だけで進んだ点 (kupd が偽) は白抜きにし、
   // そこへ向かう区間を点線にする。UDP の欠測 (dt が null) をまたぐ区間と、初期化した点 (kinit) へ向かう区間も
   // 実測でつながっていないので点線にする。初期化した点には輪を重ねる。
@@ -292,7 +297,7 @@ export class XYPlot {
     const count = to - from;
     let outside = 0;
     let prev = null;
-    ctx.lineWidth = 1.5;
+    ctx.lineWidth = 1.25;
     ctx.strokeStyle = colors.filter;
     ctx.fillStyle = colors.filter;
     for (let i = from; i <= to; i++) {
@@ -308,7 +313,7 @@ export class XYPlot {
         continue;
       }
       const ratio = count > 0 ? (i - from) / count : 1;
-      ctx.globalAlpha = 0.3 + 0.7 * ratio;
+      ctx.globalAlpha = FILTER_TRAIL_ALPHA_MIN + (FILTER_TRAIL_ALPHA_MAX - FILTER_TRAIL_ALPHA_MIN) * ratio;
       const px = frame.toX(x);
       const py = frame.toY(y);
       const predicted = !fix.kupd[i];
@@ -326,7 +331,7 @@ export class XYPlot {
       if (predicted) {
         ctx.lineWidth = 1;
         ctx.stroke();
-        ctx.lineWidth = 1.5;
+        ctx.lineWidth = 1.25;
       } else {
         ctx.fill();
       }
@@ -335,7 +340,7 @@ export class XYPlot {
         ctx.beginPath();
         ctx.arc(px, py, 6, 0, Math.PI * 2);
         ctx.stroke();
-        ctx.lineWidth = 1.5;
+        ctx.lineWidth = 1.25;
       }
       prev = [px, py];
     }
@@ -385,25 +390,34 @@ export class XYPlot {
     // 既定では最小二乗のラベルを下、フィルタのラベルを上に置く。フィルタのほうが画面の下にあれば入れ替える
     const lsBelow = !(ls && kf && kf.py > ls.py);
 
-    ctx.strokeStyle = colors.fg;
-    ctx.lineWidth = 1.5;
-    if (ls) {
-      ctx.fillStyle = view.ended ? colors.ended : colors.marker;
-      ctx.beginPath();
-      ctx.arc(ls.px, ls.py, 7, 0, Math.PI * 2);
-      ctx.fill();
+    // マーカーは軌跡と同じ色なので、背景色の太い縁取りを先に描いて軌跡から切り離し、その上に塗りと輪郭を重ねる
+    const drawMarker = (path, fill) => {
+      ctx.lineJoin = "round";
+      path();
+      ctx.strokeStyle = colors.panel;
+      ctx.lineWidth = 5;
       ctx.stroke();
+      ctx.fillStyle = fill;
+      ctx.fill();
+      ctx.strokeStyle = colors.fg;
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+    };
+    if (ls) {
+      drawMarker(() => {
+        ctx.beginPath();
+        ctx.arc(ls.px, ls.py, 7, 0, Math.PI * 2);
+      }, view.ended ? colors.ended : colors.marker);
     }
     if (kf) {
-      ctx.fillStyle = view.ended ? colors.ended : colors.filter;
-      ctx.beginPath();
-      ctx.moveTo(kf.px, kf.py - 8);
-      ctx.lineTo(kf.px + 8, kf.py);
-      ctx.lineTo(kf.px, kf.py + 8);
-      ctx.lineTo(kf.px - 8, kf.py);
-      ctx.closePath();
-      ctx.fill();
-      ctx.stroke();
+      drawMarker(() => {
+        ctx.beginPath();
+        ctx.moveTo(kf.px, kf.py - 9);
+        ctx.lineTo(kf.px + 9, kf.py);
+        ctx.lineTo(kf.px, kf.py + 9);
+        ctx.lineTo(kf.px - 9, kf.py);
+        ctx.closePath();
+      }, view.ended ? colors.ended : colors.filter);
     }
 
     // 軌跡の上に重なっても読めるよう、ラベルは背景色で縁取ってから描く
