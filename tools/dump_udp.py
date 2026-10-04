@@ -126,6 +126,8 @@ def _fake_cycle(seq: int, t_ms: int, anchors: list[int], rng: random.Random) -> 
     測距を失敗させる。フラグはタグと同じ規則で決める。最小二乗は成功した測距が 3 本以上のときだけ解け、
     フィルタは取り込めた測距が 1 本以上あれば観測で更新したことにし、無ければ予測だけで進んだことにする。
     先頭のサイクル (`seq = 0`) は全アンカーの測距を成功させ、最小二乗の解からフィルタを初期化したことにする。
+    アンカーが 3 台未満のときは最小二乗が一度も解けず、タグのフィルタは初期化されないので、全サイクルで
+    フィルタを無効 (フラグも出力も 0) にする。
     """
     init = seq == 0
     blackout = not init and rng.random() < 0.05
@@ -147,9 +149,26 @@ def _fake_cycle(seq: int, t_ms: int, anchors: list[int], rng: random.Random) -> 
     ls_x = round(true_x + rng.gauss(0, 60))
     ls_y = round(true_y + rng.gauss(0, 60))
 
-    fix_flags = FIX_FLAG_KF_OK
-    if ls_ok:
-        fix_flags |= FIX_FLAG_OK
+    fix_flags = FIX_FLAG_OK if ls_ok else 0
+    if len(anchors) < FAKE_MIN_RANGES:
+        return CycleRecord(
+            seq=seq,
+            t_tag_ms=t_ms,
+            fix_flags=fix_flags,
+            used_count=used,
+            x_mm=0,
+            y_mm=0,
+            z_mm=FAKE_TAG_Z_MM,
+            residual_mm=0,
+            kf_x_mm=0,
+            kf_y_mm=0,
+            kf_z_mm=0,
+            kf_sigma_mm=0,
+            kf_used=0,
+            kf_rejected=0,
+            ranges=tuple(ranges),
+        )
+    fix_flags |= FIX_FLAG_KF_OK
     if init:
         # 初期化した周期の kf_used は、初期化に使った最小二乗の本数 (タグと同じ)
         kf_used = used

@@ -5,6 +5,8 @@ from __future__ import annotations
 import random
 from dataclasses import replace
 
+import pytest
+
 import dump_udp
 from location_server.ingest.packet import (
     COUNT_MAX,
@@ -84,3 +86,21 @@ def test_fake_cycle_flags_follow_the_tag_rules() -> None:
 def test_recv_buffer_holds_largest_valid_packet() -> None:
     # count と anchor_n を上限まで使ったパケットも切り捨てずに受け取れる
     assert packet_size(COUNT_MAX, 255) <= dump_udp.RECV_BUFFER
+
+
+@pytest.mark.parametrize("anchor_n", [1, 2])
+def test_fake_filter_stays_uninitialized_with_too_few_anchors(anchor_n: int) -> None:
+    # 最小二乗が一度も解けないので、タグと同じくフィルタは初期化されず、無効のまま送る
+    rng = random.Random(3)
+    anchors = [0x0100 + i for i in range(anchor_n)]
+    for seq in range(200):
+        cycle = dump_udp._fake_cycle(seq, seq * 100, anchors, rng)
+        assert not cycle.fix_ok
+        assert not (cycle.kf_ok or cycle.kf_updated or cycle.kf_init)
+        assert (cycle.kf_x_mm, cycle.kf_y_mm, cycle.kf_sigma_mm, cycle.kf_used, cycle.kf_rejected) == (
+            0,
+            0,
+            0,
+            0,
+            0,
+        )
