@@ -256,6 +256,20 @@ def test_apply_note_option_overrides_file(monkeypatch: pytest.MonkeyPatch, room_
         ('{"anchors": [{"id": "0x0100", "x": "0", "y": 0, "z": 0}]}', "座標は数値"),
         ('{"anchors": [{"id": "0x0100", "x": Infinity, "y": 0, "z": 0}]}', "有限でない値"),
         ('{"anchors": [{"id": "0x0100", "x": 0, "y": NaN, "z": 0}]}', "有限でない値"),
+        # float へ直せない桁数の整数でも、未処理の例外にせず範囲外として報告する
+        pytest.param(
+            '{"anchors": [{"id": "0x0100", "x": 1' + "0" * 400 + ', "y": 0, "z": 0}]}',
+            "扱える範囲を超えて",
+            id="int-too-large-for-float",
+        ),
+        # int_max_str_digits (既定 4300 桁) を超える整数は json.loads が ValueError を送出する
+        pytest.param(
+            '{"anchors": [{"id": "0x0100", "x": 1' + "0" * 5000 + ', "y": 0, "z": 0}]}',
+            "JSON として解釈できません",
+            id="int-exceeds-max-str-digits",
+        ),
+        # 入れ子が深すぎると json.loads が RecursionError を送出する
+        pytest.param("[" * 1_000_000 + "]" * 1_000_000, "JSON として解釈できません", id="too-deep"),
         (
             '{"anchors": [{"id": "0x0100", "x": 0, "y": 0, "z": 0}, {"id": "256", "x": 1, "y": 0, "z": 0}]}',
             "重複しています: 0x0100",
@@ -344,6 +358,15 @@ def test_apply_accepts_what_server_accepts(tmp_path: Path, client: TestClient) -
 
     assert anchor_cli._load_anchor_file(path) == document
     assert client.post("/api/v1/anchors:bulk", json=document).status_code == 200
+
+
+def test_apply_reports_non_utf8_file(capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:
+    path = tmp_path / "sjis.json"
+    path.write_bytes(
+        '{"anchors": [{"id": "0x0100", "x": 0, "y": 0, "z": 0, "label": "左前"}]}'.encode("cp932")
+    )
+    assert anchor_cli.main(["apply", str(path)]) == 1
+    assert "UTF-8 として読めません" in capsys.readouterr().err
 
 
 def test_apply_reports_missing_file(capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:

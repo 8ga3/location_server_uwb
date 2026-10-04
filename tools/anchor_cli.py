@@ -156,8 +156,9 @@ def _mm(value: Any) -> int:
     """メートル表記の座標を、サーバーと同じ四捨五入で整数ミリメートルにする。"""
     if isinstance(value, bool) or not isinstance(value, int | float):
         raise InputError(f"座標は数値で書いてください: {value!r}")
-    # json.loads は Infinity / NaN も数値として読むので、ここで弾く
-    if not math.isfinite(value):
+    # json.loads は Infinity / NaN も数値として読むので、ここで弾く。
+    # 整数は常に有限で、桁が多いと float へ直せず OverflowError になるので float だけを調べる
+    if isinstance(value, float) and not math.isfinite(value):
         raise InputError(f"座標に有限でない値は使えません: {value!r}")
     return int(Decimal(str(value)).scaleb(3).to_integral_value(rounding=ROUND_HALF_UP))
 
@@ -180,10 +181,16 @@ def _load_anchor_file(path: Path, note: str | None = None) -> dict[str, Any]:
     `note` を渡すとファイルの値を上書きし、上書きした後の本文を検証する。
     """
     try:
-        document = json.loads(path.read_text(encoding="utf-8"))
+        text = path.read_text(encoding="utf-8")
     except OSError as exc:
         raise InputError(f"{path} を読めません: {exc}") from exc
-    except json.JSONDecodeError as exc:
+    except UnicodeDecodeError as exc:
+        raise InputError(f"{path} は UTF-8 として読めません: {exc}") from exc
+    try:
+        document = json.loads(text)
+    except (ValueError, RecursionError) as exc:
+        # JSONDecodeError のほか、桁数の上限 (int_max_str_digits) を超える整数は ValueError、
+        # 入れ子が深すぎる場合は RecursionError になる
         raise InputError(f"{path} は JSON として解釈できません: {exc}") from exc
     if note is not None and isinstance(document, dict):
         document["note"] = note
