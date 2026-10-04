@@ -319,7 +319,7 @@ def format_windows(fix: Fix, window_s: float, origin_ms: int) -> list[str]:
             ]
         lines.append(" ".join(_right(c, w) for c, w in zip(cells, widths, strict=False)))
         lo = hi + 1
-    lines.append("長さの単位は mm。跳びは RMS")
+    lines.append("開始は秒、平均 x / y はメートル、散らばりと跳び (RMS) はミリメートル")
     return lines
 
 
@@ -333,7 +333,7 @@ def format_jumps(jumps: list[Jump], threshold_m: float) -> list[str]:
         resid = "--" if j.resid is None else f"{j.resid * 1000:.0f}"
         rejected = "--" if j.rejected is None else str(j.rejected)
         lines.append(
-            f"  t={j.t_s:8.1f} s seq={j.seq}  最小二乗 {j.ls_step * 1000:6.0f} mm"
+            f"  t={_seconds(j.t_s):>9} s seq={j.seq}  最小二乗 {j.ls_step * 1000:6.0f} mm"
             f"  フィルタ {j.kf_step * 1000:6.0f} mm  残差 {resid} mm  棄却 {rejected}"
         )
     return lines
