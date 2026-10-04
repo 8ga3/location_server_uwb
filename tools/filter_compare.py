@@ -157,12 +157,13 @@ class Jump:
     rejected: int | None
 
 
-def big_jumps(fix: Fix, threshold_m: float) -> list[Jump]:
-    """隣り合うサイクルで最小二乗の解が `threshold_m` を超えて跳んだ箇所と、そのときのフィルタの動き。"""
+def big_jumps(fix: Fix, threshold_m: float, origin_ms: int) -> list[Jump]:
+    """隣り合うサイクルで最小二乗の解が `threshold_m` を超えて跳んだ箇所と、そのときのフィルタの動き。
+
+    時刻は `origin_ms` (セッションの最初のサイクルの時刻) からの秒数にする。`--from` で範囲を絞っても、
+    表示した時刻をそのまま `--from` / `--to` に渡せるようにするためである。
+    """
     jumps: list[Jump] = []
-    if not fix["t"]:
-        return jumps
-    t0 = fix["t"][0]
     for i in range(1, len(fix["t"])):
         p = i - 1
         if fix["seq"][i] - fix["seq"][p] != 1:
@@ -174,7 +175,14 @@ def big_jumps(fix: Fix, threshold_m: float) -> list[Jump]:
             continue
         kf_step = math.hypot(fix["kx"][i] - fix["kx"][p], fix["ky"][i] - fix["ky"][p])
         jumps.append(
-            Jump((fix["t"][i] - t0) / 1000, fix["seq"][i], step, kf_step, fix["resid"][i], fix["krej"][i])
+            Jump(
+                (fix["t"][i] - origin_ms) / 1000,
+                fix["seq"][i],
+                step,
+                kf_step,
+                fix["resid"][i],
+                fix["krej"][i],
+            )
         )
     return jumps
 
@@ -258,8 +266,21 @@ def format_metrics(metrics: FilterMetrics) -> list[str]:
     return lines
 
 
-def format_windows(fix: Fix, window_s: float) -> list[str]:
-    """`window_s` 秒ごとの区間に区切った表。散らばりが小さい区間が静止していた区間の候補になる。"""
+def _seconds(value: float) -> str:
+    """秒をミリ秒の精度で表す。末尾の 0 は落とす (10.000 は 10、0.500 は 0.5)。"""
+    text = f"{value:.3f}".rstrip("0").rstrip(".")
+    return "0" if text in ("", "-0") else text
+
+
+def format_windows(fix: Fix, window_s: float, origin_ms: int) -> list[str]:
+    """`window_s` 秒ごとの区間に区切った表。散らばりが小さい区間が静止していた区間の候補になる。
+
+    区間の境界と開始時刻は `origin_ms` (セッションの最初のサイクルの時刻) を基準にする。`--from` で範囲を
+    絞っても同じ境界になり、開始時刻をそのまま `--from` に渡せる。
+    """
+    window_ms = round(window_s * 1000)
+    if window_ms < 1:
+        raise ValueError(f"区間の長さは 1 ms 以上です: {window_s} s")
     headers = [
         "開始 [s]",
         "LS 平均 x",
@@ -274,21 +295,20 @@ def format_windows(fix: Fix, window_s: float) -> list[str]:
     lines = [" ".join(_right(h, w) for h, w in zip(headers, widths, strict=True))]
     if not fix["t"]:
         return lines
-    t0 = fix["t"][0]
     lo = 0
     n = len(fix["t"])
     while lo < n:
-        start = fix["t"][lo] - (fix["t"][lo] - t0) % int(window_s * 1000)
+        start = fix["t"][lo] - (fix["t"][lo] - origin_ms) % window_ms
         hi = lo
-        while hi + 1 < n and fix["t"][hi + 1] < start + window_s * 1000:
+        while hi + 1 < n and fix["t"][hi + 1] < start + window_ms:
             hi += 1
         m = filter_metrics(fix, lo, hi)
-        begin = (start - t0) / 1000
+        begin = _seconds((start - origin_ms) / 1000)
         if m is None:
-            cells = [f"{begin:.0f}", "(比較できるサイクルなし)"]
+            cells = [begin, "(比較できるサイクルなし)"]
         else:
             cells = [
-                f"{begin:.0f}",
+                begin,
                 f"{m.ls.mean_x:.3f}",
                 f"{m.ls.mean_y:.3f}",
                 f"{m.ls.scatter_rms * 1000:.1f}",
@@ -345,16 +365,24 @@ def run(args: argparse.Namespace, fetch: Fetch) -> list[str]:
     lines += format_metrics(metrics)
     lines.append("散らばりは静止している区間で見る。動いている区間では移動量が入る")
     if args.window is not None:
-        lines += ["", *format_windows(fix, args.window)]
+        lines += ["", *format_windows(fix, args.window, first_t)]
     if args.list_jump_mm > 0:
-        lines += ["", *format_jumps(big_jumps(fix, args.list_jump_mm / 1000), args.list_jump_mm / 1000)]
+        threshold_m = args.list_jump_mm / 1000
+        lines += ["", *format_jumps(big_jumps(fix, threshold_m, first_t), threshold_m)]
     return lines
 
 
-def _positive(value: str) -> float:
-    number = float(value)
-    if not number > 0:
-        raise argparse.ArgumentTypeError(f"正の値を指定してください: {value}")
+# --window の下限 [s]。区間の境界はミリ秒で数えるので、これより短いと区間の長さが 0 になる
+WINDOW_MIN_S = 0.001
+
+
+def _window(value: str) -> float:
+    try:
+        number = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"数値を指定してください: {value}") from None
+    if not math.isfinite(number) or number < WINDOW_MIN_S:
+        raise argparse.ArgumentTypeError(f"{WINDOW_MIN_S} 以上の有限の値を指定してください: {value}")
     return number
 
 
@@ -364,7 +392,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--server", default=DEFAULT_SERVER, help=f"サーバーの URL (既定 {DEFAULT_SERVER})")
     parser.add_argument("--from", dest="from_s", type=float, help="範囲の始まり [s] (最初のサイクルから)")
     parser.add_argument("--to", dest="to_s", type=float, help="範囲の終わり [s] (最初のサイクルから)")
-    parser.add_argument("--window", type=_positive, help="この秒数ごとの区間に区切った表も出す")
+    parser.add_argument(
+        "--window", type=_window, help=f"この秒数ごとの区間に区切った表も出す ({WINDOW_MIN_S} 以上)"
+    )
     parser.add_argument(
         "--list-jump-mm",
         type=float,

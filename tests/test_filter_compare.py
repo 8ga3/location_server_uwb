@@ -112,7 +112,7 @@ def test_no_comparable_cycles() -> None:
 
 def test_big_jumps_lists_least_squares_jumps() -> None:
     fix = _fix([0.0, 0.4, 0.41], [0.0] * 3, [0.0, 0.02, 0.03], [0.0] * 3, krej=[0, 1, 0])
-    jumps = filter_compare.big_jumps(fix, 0.2)
+    jumps = filter_compare.big_jumps(fix, 0.2, fix["t"][0])
     assert len(jumps) == 1
     assert jumps[0].seq == 1
     assert jumps[0].ls_step == pytest.approx(0.4)
@@ -172,6 +172,38 @@ def test_run_uses_latest_session_and_relative_range() -> None:
     assert "LS 散らばり" in text
 
 
-def test_window_must_be_positive() -> None:
+@pytest.mark.parametrize("value", ["0", "0.0005", "-1", "inf", "nan", "abc"])
+def test_window_rejects_values_that_cannot_make_a_window(value: str) -> None:
+    # ミリ秒にして 1 未満になる値や有限でない値は、データを取りに行く前に引数エラーにする
     with pytest.raises(SystemExit):
-        filter_compare.build_parser().parse_args(["--window", "0"])
+        filter_compare.build_parser().parse_args(["--window", value])
+
+
+def test_window_accepts_one_millisecond() -> None:
+    args = filter_compare.build_parser().parse_args(["--window", "0.001"])
+    assert args.window == pytest.approx(0.001)
+
+
+def test_times_are_relative_to_session_start_even_with_from() -> None:
+    # 40 サイクル (0〜3.9 s)。2.5 s のサイクルで最小二乗だけが 0.4 m 跳ぶ
+    n = 40
+    xs = [0.0] * n
+    xs[25] = 0.4
+    fix = _fix(xs, [0.0] * n, [0.0] * n, [0.0] * n)
+    api = _FakeApi(fix, limit=1000)
+    args = filter_compare.build_parser().parse_args(["--from", "2", "--window", "0.5"])
+    lines = filter_compare.run(args, api)
+    starts = [line.split()[0] for line in lines if line[:9].strip().replace(".", "").isdigit()]
+    # 区間の開始はセッションの最初のサイクルからの秒数で、0.5 s 刻みが区別できる
+    assert starts[:4] == ["2", "2.5", "3", "3.5"]
+    jumps = [line for line in lines if line.strip().startswith("t=")]
+    assert len(jumps) == 2
+    assert "t=     2.5 s" in jumps[0]
+
+
+def test_window_start_is_shown_in_milliseconds() -> None:
+    n = 10
+    fix = _fix([0.0] * n, [0.0] * n, [0.0] * n, [0.0] * n)
+    lines = filter_compare.format_windows(fix, 0.25, fix["t"][0])
+    starts = [line.split()[0] for line in lines[1:-1]]
+    assert starts == ["0", "0.25", "0.5", "0.75"]
