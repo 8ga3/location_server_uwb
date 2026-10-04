@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from fastapi.testclient import TestClient
 
 import anchor_cli
 
@@ -277,6 +278,72 @@ def test_apply_reports_invalid_file(
 
     assert server.calls == []
     assert message in capsys.readouterr().err
+
+
+# サーバーの bulk API が 422 で拒否する本文。CLI も送る前に同じものを拒否する
+_INVALID_DOCUMENTS: list[Any] = [
+    {"anchors": []},
+    {"anchors": [{"id": "0x0100", "x": 0, "y": 0, "z": 0}], "rev": 3},
+    {"anchors": [{"id": "0x0100", "x": 0, "y": 0, "z": 0, "x_mm": 0}]},
+    {"anchors": [{"id": f"{0x0100 + i}", "x": 0, "y": 0, "z": 0} for i in range(256)]},
+    {"anchors": [{"id": "0x00FF", "x": 0, "y": 0, "z": 0}]},
+    {"anchors": [{"id": "0xFFFF", "x": 0, "y": 0, "z": 0}]},
+    {"anchors": [{"id": "+256", "x": 0, "y": 0, "z": 0}]},
+    {"anchors": [{"id": "1_0_0_0", "x": 0, "y": 0, "z": 0}]},
+    {"anchors": [{"id": "0x0100", "x": 1e9, "y": 0, "z": 0}]},
+    {"anchors": [{"id": "0x0100", "x": 0, "y": 0, "z": 0}], "source": "guess"},
+    {"anchors": [{"id": "0x0100", "x": 0, "y": 0, "z": 0}], "source": None},
+    {"anchors": [{"id": "0x0100", "x": 0, "y": 0, "z": 0}], "note": "x" * 201},
+    {"anchors": [{"id": "0x0100", "x": 0, "y": 0, "z": 0}], "note": 1},
+    {"anchors": [{"id": "0x0100", "x": 0, "y": 0, "z": 0, "label": 1}]},
+    {"anchors": [{"id": "0x0100", "x": 0, "y": 0, "z": 0, "enabled": [True]}]},
+]
+
+
+@pytest.mark.parametrize("document", _INVALID_DOCUMENTS)
+def test_apply_rejects_what_server_rejects(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    client: TestClient,
+    document: Any,
+) -> None:
+    assert client.post("/api/v1/anchors:bulk", json=document).status_code == 422
+
+    # 現在の構成も空なので、検証を通ってしまうと「変更はありません」で成功扱いになる
+    server = _Server([])
+    monkeypatch.setattr(anchor_cli, "_request", server)
+    path = tmp_path / "invalid.json"
+    path.write_text(json.dumps(document), encoding="utf-8")
+
+    assert anchor_cli.main(["apply", str(path)]) == 1
+    assert server.calls == []
+    assert capsys.readouterr().err
+
+
+def test_apply_checks_note_option(monkeypatch: pytest.MonkeyPatch, room_file: Path) -> None:
+    server = _Server([])
+    monkeypatch.setattr(anchor_cli, "_request", server)
+
+    assert anchor_cli.main(["apply", str(room_file), "--note", "x" * 201]) == 1
+    assert server.calls == []
+
+
+def test_apply_accepts_what_server_accepts(tmp_path: Path, client: TestClient) -> None:
+    document = {
+        "source": "survey",
+        "note": "x" * 200,
+        "anchors": [
+            {"id": "0x0100", "x": 0, "y": 0, "z": 0, "label": None, "enabled": False},
+            {"id": " 0x0101 ", "x": -2147483.647, "y": 2147483.647, "z": 0.0005},
+            {"id": "65534", "x": 1, "y": 2, "z": 3, "label": "柱"},
+        ],
+    }
+    path = tmp_path / "valid.json"
+    path.write_text(json.dumps(document), encoding="utf-8")
+
+    assert anchor_cli._load_anchor_file(path) == document
+    assert client.post("/api/v1/anchors:bulk", json=document).status_code == 200
 
 
 def test_apply_reports_missing_file(capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:

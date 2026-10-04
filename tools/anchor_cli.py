@@ -19,6 +19,7 @@ import argparse
 import json
 import math
 import os
+import re
 import sys
 import urllib.error
 import urllib.parse
@@ -29,6 +30,20 @@ from typing import Any
 
 DEFAULT_SERVER = "http://127.0.0.1:8000"
 TIMEOUT_SEC = 10.0
+
+# 座標表ファイルの検証に使う値。CLI は追加の依存なしで動かすため、サーバーの定義
+# (`location_server.units` と `location_server.api.schemas`) を読み込まずに同じ値を持つ
+ANCHOR_ID_MIN = 0x0100
+ANCHOR_ID_MAX = 0xFFFE
+COORD_MM_MAX = 2**31 - 1
+BULK_ANCHORS_MAX = 255
+CONFIG_NOTE_MAX_LEN = 200
+ANCHOR_SOURCES = ("manual", "survey")
+_DOCUMENT_KEYS = frozenset({"anchors", "source", "note"})
+_ANCHOR_KEYS = frozenset({"id", "x", "y", "z", "label", "enabled"})
+_HEX_ID_PATTERN = re.compile(r"0[xX](?P<digits>[0-9a-fA-F]+)")
+_DECIMAL_ID_PATTERN = re.compile(r"[0-9]+")
+_MAX_ID_DIGITS = 16
 
 
 class ApiError(RuntimeError):
@@ -124,15 +139,17 @@ def cmd_config(args: argparse.Namespace) -> int:
 def _anchor_id(value: Any) -> int:
     """`0x0100` 形式または 10 進数表記の ID を整数にする。
 
-    差分を取るためだけに使い、範囲はサーバーが検証する。
+    サーバーの `parse_hex_id` と同じ表記だけを受け付ける。範囲は確かめない。
     """
     if not isinstance(value, str):
         raise InputError(f"id は文字列で書いてください: {value!r}")
     text = value.strip()
-    try:
-        return int(text[2:], 16) if text[:2].lower() == "0x" else int(text, 10)
-    except ValueError as exc:
-        raise InputError(f"id として解釈できません: {value!r}") from exc
+    hex_match = _HEX_ID_PATTERN.fullmatch(text)
+    if hex_match is not None and len(hex_match.group("digits")) <= _MAX_ID_DIGITS:
+        return int(hex_match.group("digits"), 16)
+    if _DECIMAL_ID_PATTERN.fullmatch(text) is not None and len(text) <= _MAX_ID_DIGITS:
+        return int(text, 10)
+    raise InputError(f"id として解釈できません: {value!r}")
 
 
 def _mm(value: Any) -> int:
@@ -157,31 +174,70 @@ def _anchor_key(anchor: dict[str, Any], source: str) -> tuple[Any, ...]:
     )
 
 
-def _load_anchor_file(path: Path) -> dict[str, Any]:
-    """座標表ファイル (JSON) を読み、bulk API へ渡す本文として返す。"""
+def _load_anchor_file(path: Path, note: str | None = None) -> dict[str, Any]:
+    """座標表ファイル (JSON) を読み、bulk API へ渡す本文として返す。
+
+    `note` を渡すとファイルの値を上書きし、上書きした後の本文を検証する。
+    """
     try:
         document = json.loads(path.read_text(encoding="utf-8"))
     except OSError as exc:
         raise InputError(f"{path} を読めません: {exc}") from exc
     except json.JSONDecodeError as exc:
         raise InputError(f"{path} は JSON として解釈できません: {exc}") from exc
-    if not isinstance(document, dict) or not isinstance(document.get("anchors"), list):
-        raise InputError(f"{path} には anchors の配列を持つオブジェクトを書いてください")
+    if note is not None and isinstance(document, dict):
+        document["note"] = note
+    return _check_document(document)
+
+
+def _check_document(document: Any) -> dict[str, Any]:
+    """bulk API の本文と同じ規則で座標表を検証する。
+
+    検証を通らないファイルは送る前に弾く。差分が無いと判断して送らない場合にも、
+    サーバーなら拒否する内容を黙って通さないようにするため、規則は `AnchorBulkIn` に揃える。
+    """
+    if not isinstance(document, dict):
+        raise InputError("座標表は anchors の配列を持つオブジェクトで書いてください")
+    unknown = sorted(set(document) - _DOCUMENT_KEYS)
+    if unknown:
+        raise InputError(f"未知の項目があります: {', '.join(unknown)}")
+    anchors = document.get("anchors")
+    if not isinstance(anchors, list):
+        raise InputError("座標表は anchors の配列を持つオブジェクトで書いてください")
+    if not 1 <= len(anchors) <= BULK_ANCHORS_MAX:
+        raise InputError(f"anchors には 1〜{BULK_ANCHORS_MAX} 台を書いてください: {len(anchors)} 台")
+    if document.get("source", "manual") not in ANCHOR_SOURCES:
+        raise InputError(f"source は {', '.join(ANCHOR_SOURCES)} のいずれかです: {document['source']!r}")
+    note = document.get("note")
+    if note is not None and (not isinstance(note, str) or len(note) > CONFIG_NOTE_MAX_LEN):
+        raise InputError(f"note は {CONFIG_NOTE_MAX_LEN} 文字以内の文字列で書いてください")
+
     seen: set[int] = set()
-    for anchor in document["anchors"]:
+    for anchor in anchors:
         if not isinstance(anchor, dict):
             raise InputError(f"anchors の要素はオブジェクトで書いてください: {anchor!r}")
+        name = anchor.get("id", "(id なし)")
         missing = [key for key in ("id", "x", "y", "z") if key not in anchor]
         if missing:
-            raise InputError(f"{anchor.get('id', '(id なし)')} に {', '.join(missing)} がありません")
-        # 差分の表示で使う値だけここで確かめる。範囲はサーバーが検証する。
-        # ID の重複は差分の表示が潰れてしまうので、送る前にここでも弾く
+            raise InputError(f"{name} に {', '.join(missing)} がありません")
+        unknown = sorted(set(anchor) - _ANCHOR_KEYS)
+        if unknown:
+            raise InputError(f"{name} に未知の項目があります: {', '.join(unknown)}")
         anchor_id = _anchor_id(anchor["id"])
+        if not ANCHOR_ID_MIN <= anchor_id <= ANCHOR_ID_MAX:
+            raise InputError(
+                f"アンカー ID は 0x{ANCHOR_ID_MIN:04X}..0x{ANCHOR_ID_MAX:04X} の範囲です: {name}"
+            )
         if anchor_id in seen:
             raise InputError(f"アンカー ID が重複しています: 0x{anchor_id:04X}")
         seen.add(anchor_id)
         for key in ("x", "y", "z"):
-            _mm(anchor[key])
+            if not -COORD_MM_MAX <= _mm(anchor[key]) <= COORD_MM_MAX:
+                raise InputError(f"{name} の {key} が扱える範囲を超えています: {anchor[key]!r}")
+        if anchor.get("label") is not None and not isinstance(anchor["label"], str):
+            raise InputError(f"{name} の label は文字列で書いてください: {anchor['label']!r}")
+        if not isinstance(anchor.get("enabled", True), bool):
+            raise InputError(f"{name} の enabled は true か false で書いてください: {anchor['enabled']!r}")
     return document
 
 
@@ -213,9 +269,7 @@ def _print_diff(current: dict[str, Any], document: dict[str, Any]) -> bool:
 
 
 def cmd_apply(args: argparse.Namespace) -> int:
-    document = _load_anchor_file(Path(args.file))
-    if args.note is not None:
-        document["note"] = args.note
+    document = _load_anchor_file(Path(args.file), args.note)
 
     current = _request(args.server, "GET", "/api/v1/anchors", args.token)
     print(f"rev {current['rev']} からの差分 (+ 追加、- 削除、~ 変更):")
