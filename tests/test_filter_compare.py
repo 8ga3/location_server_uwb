@@ -198,7 +198,7 @@ def test_times_are_relative_to_session_start_even_with_from() -> None:
     assert starts[:4] == ["2", "2.5", "3", "3.5"]
     jumps = [line for line in lines if line.strip().startswith("t=")]
     assert len(jumps) == 2
-    assert "t=     2.5 s" in jumps[0]
+    assert jumps[0].split()[:2] == ["t=", "2.5"]
 
 
 def test_window_start_is_shown_in_milliseconds() -> None:
@@ -207,3 +207,19 @@ def test_window_start_is_shown_in_milliseconds() -> None:
     lines = filter_compare.format_windows(fix, 0.25, fix["t"][0])
     starts = [line.split()[0] for line in lines[1:-1]]
     assert starts == ["0", "0.25", "0.5", "0.75"]
+
+
+def test_jump_times_keep_milliseconds() -> None:
+    # 30 Hz の記録では 2.033 s のような時刻になる。0.1 s に丸めると --from / --to に渡したときにずれる
+    fix = _fix([0.0, 0.4], [0.0] * 2, [0.0] * 2, [0.0] * 2)
+    fix["t"] = [1000, 3033]
+    lines = filter_compare.format_jumps(filter_compare.big_jumps(fix, 0.2, 1000), 0.2)
+    assert "2.033 s" in lines[1]
+
+
+def test_window_table_states_units() -> None:
+    n = 4
+    fix = _fix([0.0] * n, [0.0] * n, [0.0] * n, [0.0] * n)
+    note = filter_compare.format_windows(fix, 1.0, fix["t"][0])[-1]
+    assert "平均 x / y はメートル" in note
+    assert "ミリメートル" in note
