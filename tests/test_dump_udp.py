@@ -14,6 +14,9 @@ from location_server.ingest.packet import (
     FIX_FLAG_KF_OK,
     FIX_FLAG_KF_UPDATED,
     FIX_FLAG_OK,
+    RANGE_KF_ACCEPTED,
+    RANGE_KF_REJECTED,
+    RANGE_KF_UNUSED,
     TelemetryPacket,
     decode_packet,
     encode_packet,
@@ -26,7 +29,7 @@ def test_format_cycle() -> None:
     packet = decode_packet(encode_packet(make_packet(seq=5, t_tag_ms=1000, count=1)))
     line = dump_udp.format_cycle(packet, packet.cycles[0])
     assert line.startswith("tag_id=1,boot_id=0xAAAAAAAA,seq=5,t_ms=1000,fix=OK,x_mm=1234,y_mm=-5678,")
-    assert "0x0100=1000mm/6ms" in line
+    assert ",0x0100=1000mm/6ms/kf_use," in line
     assert "last=1" not in line
     assert ",kf=UPDATE,kf_x_mm=1200,kf_y_mm=-5600,kf_z_mm=1000,kf_sigma_mm=35," in line
     assert ",kf_used=4,kf_rejected=0," in line
@@ -49,6 +52,19 @@ def test_format_cycle_filter_states() -> None:
     assert "kf_x_mm" not in line
 
 
+def test_format_cycle_range_kf() -> None:
+    packet = make_packet(count=1)
+    cycle = packet.cycles[0]
+    kinds = (RANGE_KF_ACCEPTED, RANGE_KF_REJECTED, RANGE_KF_UNUSED, RANGE_KF_ACCEPTED)
+    ranges = tuple(replace(r, kf=k) for r, k in zip(cycle.ranges, kinds, strict=True))
+    line = dump_udp.format_cycle(packet, replace(cycle, ranges=ranges))
+    # 使っていない測距には何も付けない
+    assert (
+        ",0x0100=1000mm/6ms/kf_use,0x0101=1100mm/6ms/kf_rej,0x0102=1200mm/6ms,0x0103=1300mm/6ms/kf_use"
+        in line
+    )
+
+
 def test_fake_cycles_encode_and_stay_consistent() -> None:
     rng = random.Random(1)
     anchors = [0x0100 + i for i in range(4)]
@@ -59,6 +75,14 @@ def test_fake_cycles_encode_and_stay_consistent() -> None:
     for cycle in decoded.cycles:
         assert cycle.kf_ok
         assert cycle.kf_used + cycle.kf_rejected <= sum(r.ok for r in cycle.ranges)
+        if cycle.kf_init:
+            # 最小二乗の解から初期化したサイクルでは、フィルタは測距を使っていない
+            assert all(r.kf == RANGE_KF_UNUSED for r in cycle.ranges)
+        else:
+            assert sum(r.kf == RANGE_KF_ACCEPTED for r in cycle.ranges) == cycle.kf_used
+            assert sum(r.kf == RANGE_KF_REJECTED for r in cycle.ranges) == cycle.kf_rejected
+        # 失敗した測距はフィルタも使わない
+        assert all(r.kf == RANGE_KF_UNUSED for r in cycle.ranges if not r.ok)
         if cycle.fix_ok:
             # フィルタの位置は最小二乗の解の近くにある
             assert abs(cycle.kf_x_mm - cycle.x_mm) < 1000
@@ -81,6 +105,11 @@ def test_fake_cycle_flags_follow_the_tag_rules() -> None:
     # 予測だけの周期と、最小二乗は解けないがフィルタは観測で更新した周期の両方が現れる
     assert any(not c.kf_updated for c in cycles)
     assert any(not c.fix_ok and c.kf_updated for c in cycles)
+    # 測距ごとの kf の本数はサイクルの取り込み数・棄却数と一致し、棄却した測距も現れる
+    for cycle in cycles[1:]:
+        assert sum(r.kf == RANGE_KF_ACCEPTED for r in cycle.ranges) == cycle.kf_used
+        assert sum(r.kf == RANGE_KF_REJECTED for r in cycle.ranges) == cycle.kf_rejected
+    assert any(r.kf == RANGE_KF_REJECTED for c in cycles for r in c.ranges)
 
 
 def test_recv_buffer_holds_largest_valid_packet() -> None:
@@ -97,6 +126,7 @@ def test_fake_filter_stays_uninitialized_with_too_few_anchors(anchor_n: int) -> 
         cycle = dump_udp._fake_cycle(seq, seq * 100, anchors, rng)
         assert not cycle.fix_ok
         assert not (cycle.kf_ok or cycle.kf_updated or cycle.kf_init)
+        assert all(r.kf == RANGE_KF_UNUSED for r in cycle.ranges)
         assert (cycle.kf_x_mm, cycle.kf_y_mm, cycle.kf_sigma_mm, cycle.kf_used, cycle.kf_rejected) == (
             0,
             0,

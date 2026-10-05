@@ -87,7 +87,7 @@ def test_migrate_from_version_1_adds_filter_columns(monkeypatch: pytest.MonkeyPa
             """
         )
         monkeypatch.setattr(db, "MIGRATIONS", MIGRATIONS)
-        assert migrate(connection) == MIGRATIONS[-1][0] == 2
+        assert migrate(connection) == MIGRATIONS[-1][0] == 3
         row = connection.execute("SELECT * FROM position_fix").fetchone()
         assert (row["ok"], row["x_mm"], row["residual_mm"]) == (1, 10, 42)
         assert (row["kf_ok"], row["kf_updated"], row["kf_init"]) == (0, 0, 0)
@@ -95,5 +95,31 @@ def test_migrate_from_version_1_adds_filter_columns(monkeypatch: pytest.MonkeyPa
             assert row[column] is None, column
         # 初期リビジョンは 0001 を当てたときの 1 行だけ
         assert connection.execute("SELECT count(*) FROM config_meta").fetchone()[0] == 1
+    finally:
+        connection.close()
+
+
+def test_migrate_from_version_2_adds_range_kf_column(monkeypatch: pytest.MonkeyPatch) -> None:
+    connection = connect(":memory:")
+    try:
+        # 0002 までを当てた DB (測距の kf を足す前) に、測距記録を 1 行書いておく
+        monkeypatch.setattr(db, "MIGRATIONS", MIGRATIONS[:2])
+        assert migrate(connection) == 2
+        connection.execute(
+            "INSERT INTO session (tag_id, boot_id, started_at, last_seen_at) VALUES (1, 1, 'a', 'a')"
+        )
+        connection.execute(
+            """
+            INSERT INTO range_sample
+                (session_id, seq, t_tag_ms, anchor_id, status, distance_mm, elapsed_ms)
+            VALUES (1, 0, 1000, 256, 0, 1500, 6)
+            """
+        )
+        monkeypatch.setattr(db, "MIGRATIONS", MIGRATIONS)
+        assert migrate(connection) == MIGRATIONS[-1][0] == 3
+        row = connection.execute("SELECT * FROM range_sample").fetchone()
+        assert (row["anchor_id"], row["distance_mm"], row["elapsed_ms"]) == (256, 1500, 6)
+        # 足す前の行はフィルタでの扱いを記録していないので NULL のまま
+        assert row["kf"] is None
     finally:
         connection.close()

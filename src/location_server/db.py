@@ -15,6 +15,7 @@ from pathlib import Path
 MIGRATIONS: tuple[tuple[int, str], ...] = (
     (1, "0001_initial.sql"),
     (2, "0002_kalman_filter.sql"),
+    (3, "0003_range_kf.sql"),
 )
 
 INITIAL_PAN_ID = 0xDECA

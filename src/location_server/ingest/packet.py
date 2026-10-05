@@ -1,9 +1,11 @@
 """テレメトリ UDP パケットのデコードとエンコード。
 
 形式は設計文書 6.2 に従う。すべてリトルエンディアンでパディングは入れない。
-受け付けるのは version 2 だけである。version 2 はサイクルレコードに、タグ側のカルマンフィルタが出した
-位置 (`kf_*`) を最小二乗の解と並べて載せる。タグとサーバーは同時に切り替える前提なので、
-version 1 のパケットは `bad_version` として捨てる。
+受け付けるのは version 3 だけである。version 2 でサイクルレコードに、タグ側のカルマンフィルタが出した
+位置 (`kf_*`) を最小二乗の解と並べて載せた。version 3 ではさらに測距レコードの末尾へ、その測距を
+フィルタがどう扱ったか (`kf`: 使っていない / 取り込んだ / ゲートで棄却した) を 1 バイト足し、
+どのアンカーの測距が棄却されたかを追えるようにした。タグとサーバーは同時に切り替える前提なので、
+version 1 と version 2 のパケットは `bad_version` として捨てる。
 DB へ書き込む前にここで magic、version、長さ、各値の範囲を検証し、1 つでも外れたパケットは
 理由つきの `PacketDecodeError` として丸ごと捨てる。部分的に読めたサイクルだけを拾うことはしない。
 
@@ -20,22 +22,22 @@ from enum import StrEnum
 from location_server.units import ANCHOR_ID_MAX, ANCHOR_ID_MIN, TAG_ID_MAX, TAG_ID_MIN
 
 MAGIC = 0x54425755  # 'U' 'W' 'B' 'T' をリトルエンディアンで読んだ値
-VERSION = 2
+VERSION = 3
 
 # ヘッダ: magic, version, flags, tag_id, boot_id, seq, t_tag_ms, count, anchor_n, reserved
 HEADER = struct.Struct("<IBBHIIIBBH")
 # サイクルレコード: dt_ms, fix_flags, used_count, x_mm, y_mm, z_mm, resid_mm,
 #                   kf_x_mm, kf_y_mm, kf_z_mm, kf_sigma_mm, kf_used, kf_rejected
 CYCLE = struct.Struct("<HBBiihHiihHBB")
-# 測距レコード: anchor_id, status, elapsed_ms, distance_mm
-RANGE = struct.Struct("<HBBi")
+# 測距レコード: anchor_id, status, elapsed_ms, distance_mm, kf
+RANGE = struct.Struct("<HBBiB")
 
 COUNT_MIN = 1
 COUNT_MAX = 16
 ANCHOR_N_MIN = 1
 
 FLAG_LAST = 0x01  # このパケットが最後 (セッション終了)
-FLAGS_KNOWN = FLAG_LAST  # version 2 で意味を持つビット。ほかは予約で 0
+FLAGS_KNOWN = FLAG_LAST  # version 3 で意味を持つビット。ほかは予約で 0
 FIX_FLAG_OK = 0x01  # 最小二乗の測位成功
 FIX_FLAG_3D = 0x02  # 3D 解
 FIX_FLAG_KF_OK = 0x04  # フィルタの位置が有効
@@ -45,6 +47,15 @@ FIX_FLAG_KF_INIT = 0x10  # このサイクルで最小二乗の解からフィ�
 FIX_FLAGS_KNOWN = FIX_FLAG_OK | FIX_FLAG_3D | FIX_FLAG_KF_OK | FIX_FLAG_KF_UPDATED | FIX_FLAG_KF_INIT
 
 STATUS_OK = 0
+
+# 測距レコードの kf。その測距をタグ側のカルマンフィルタがどう扱ったかを表す。
+# RANGE_KF_UNUSED はフィルタがこの測距を使っていないことを表す。測距の失敗、負の値のため解から外した、
+# フィルタが無効、このサイクルで最小二乗の解からフィルタを初期化した、アンカーの真下にいるため飛ばした、
+# のいずれかに当たる
+RANGE_KF_UNUSED = 0
+RANGE_KF_ACCEPTED = 1  # フィルタがこの測距で更新した
+RANGE_KF_REJECTED = 2  # イノベーションのゲートで棄却した
+RANGE_KF_MAX = RANGE_KF_REJECTED  # 3..255 は予約
 
 _U32_MASK = 0xFFFFFFFF
 
@@ -74,12 +85,16 @@ class PacketDecodeError(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class RangeRecord:
-    """測距 1 本ぶん。`distance_mm` はタグが送った値そのままで、`status != 0` なら通常 0 が入る。"""
+    """測距 1 本ぶん。`distance_mm` はタグが送った値そのままで、`status != 0` なら通常 0 が入る。
+
+    `kf` はこの測距をタグ側のカルマンフィルタがどう扱ったかで、`RANGE_KF_*` のいずれかを取る。
+    """
 
     anchor_id: int
     status: int
     elapsed_ms: int
     distance_mm: int
+    kf: int
 
     @property
     def ok(self) -> bool:
@@ -211,13 +226,17 @@ def decode_packet(data: bytes) -> TelemetryPacket:
             raise PacketDecodeError(DropReason.BAD_RESERVED, f"cycle={index} fix_flags=0x{fix_flags:02X}")
         ranges: list[RangeRecord] = []
         for _ in range(anchor_n):
-            anchor_id, status, elapsed_ms, distance_mm = RANGE.unpack_from(data, offset)
+            anchor_id, status, elapsed_ms, distance_mm, kf = RANGE.unpack_from(data, offset)
             offset += RANGE.size
             if not ANCHOR_ID_MIN <= anchor_id <= ANCHOR_ID_MAX:
                 raise PacketDecodeError(
                     DropReason.BAD_ANCHOR_ID, f"cycle={index} anchor_id=0x{anchor_id:04X}"
                 )
-            ranges.append(RangeRecord(anchor_id, status, elapsed_ms, distance_mm))
+            if kf > RANGE_KF_MAX:
+                raise PacketDecodeError(
+                    DropReason.BAD_RESERVED, f"cycle={index} anchor_id=0x{anchor_id:04X} kf={kf}"
+                )
+            ranges.append(RangeRecord(anchor_id, status, elapsed_ms, distance_mm, kf))
         cycles.append(
             CycleRecord(
                 # seq と millis() はどちらも 32 ビットで折り返すので、展開後も同じ幅に揃える
@@ -300,5 +319,7 @@ def encode_packet(packet: TelemetryPacket) -> bytes:
                 cycle.kf_rejected,
             )
         )
-        parts.extend(RANGE.pack(r.anchor_id, r.status, r.elapsed_ms, r.distance_mm) for r in cycle.ranges)
+        parts.extend(
+            RANGE.pack(r.anchor_id, r.status, r.elapsed_ms, r.distance_mm, r.kf) for r in cycle.ranges
+        )
     return b"".join(parts)

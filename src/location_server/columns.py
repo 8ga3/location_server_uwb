@@ -16,6 +16,8 @@
   独立で、フィルタの位置が無効 (`kok` が偽) なサイクルだけ `null` にする。`kupd` は観測で更新したか
   (偽なら予測のみ)、`kinit` は最小二乗の解から初期化したかで、`kok` が偽なら偽とする。`kused` / `krej` は
   フィルタが取り込んだ測距と棄却した測距の本数で、フィルタの列を足す前に記録した行では `null` になる
+- 測距の `kf` は、その測距をタグ側のカルマンフィルタがどう扱ったか (0 = 使っていない、1 = 取り込んだ、
+  2 = ゲートで棄却した)。測距レコードに `kf` を足す前 (パケット形式 version 2 まで) に記録した行では `null`
 """
 
 from __future__ import annotations
@@ -151,19 +153,30 @@ class FixColumns:
 
 @dataclass(slots=True)
 class RangeColumns:
-    """1 台のアンカーに対する測距の列。`st` は status (0 = OK)、`el` は `elapsed_ms`。"""
+    """1 台のアンカーに対する測距の列。`st` は status (0 = OK)、`el` は `elapsed_ms`。
+
+    `kf` はその測距をフィルタがどう扱ったか (`RANGE_KF_*` の値) で、記録していない行は `None`。
+    """
 
     t: list[int] = field(default_factory=list)
     seq: list[int] = field(default_factory=list)
     d: list[float | None] = field(default_factory=list)
     st: list[int] = field(default_factory=list)
     el: list[int | None] = field(default_factory=list)
+    kf: list[int | None] = field(default_factory=list)
 
     def __len__(self) -> int:
         return len(self.t)
 
     def add(
-        self, *, t_ms: int, seq: int, status: int, distance_mm: int | None, elapsed_ms: int | None
+        self,
+        *,
+        t_ms: int,
+        seq: int,
+        status: int,
+        distance_mm: int | None,
+        elapsed_ms: int | None,
+        kf: int | None,
     ) -> None:
         """1 記録ぶんを足す。失敗した測距の距離は値が入っていても捨てる。
 
@@ -174,9 +187,10 @@ class RangeColumns:
         self.d.append(_meters_or_none(distance_mm) if status == STATUS_OK else None)
         self.st.append(status)
         self.el.append(elapsed_ms)
+        self.kf.append(kf)
 
     def to_json(self) -> dict[str, list[Any]]:
-        return {"t": self.t, "seq": self.seq, "d": self.d, "st": self.st, "el": self.el}
+        return {"t": self.t, "seq": self.seq, "d": self.d, "st": self.st, "el": self.el, "kf": self.kf}
 
 
 @dataclass(slots=True)
@@ -194,12 +208,13 @@ class RangeTable:
         status: int,
         distance_mm: int | None,
         elapsed_ms: int | None,
+        kf: int | None,
     ) -> None:
         columns = self.anchors.get(anchor_id)
         if columns is None:
             columns = RangeColumns()
             self.anchors[anchor_id] = columns
-        columns.add(t_ms=t_ms, seq=seq, status=status, distance_mm=distance_mm, elapsed_ms=elapsed_ms)
+        columns.add(t_ms=t_ms, seq=seq, status=status, distance_mm=distance_mm, elapsed_ms=elapsed_ms, kf=kf)
 
     def add_cycle(self, cycle: CycleRecord, *, t_ms: int, seq: int) -> None:
         """受信したサイクルの測距を足す。`t_ms` / `seq` には折り返しを展開した値を渡す。"""
@@ -211,6 +226,7 @@ class RangeTable:
                 status=record.status,
                 distance_mm=record.distance_mm,
                 elapsed_ms=record.elapsed_ms,
+                kf=record.kf,
             )
 
     def to_json(self) -> dict[str, dict[str, list[Any]]]:

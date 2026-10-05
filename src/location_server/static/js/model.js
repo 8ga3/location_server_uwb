@@ -7,7 +7,7 @@ export const FIX_KEYS = [
   "t", "seq", "dt", "x", "y", "z", "ok", "used", "resid",
   "kx", "ky", "kz", "kok", "kupd", "kinit", "ksig", "kused", "krej",
 ];
-export const RANGE_KEYS = ["t", "seq", "d", "st", "el"];
+export const RANGE_KEYS = ["t", "seq", "d", "st", "el", "kf"];
 
 function emptyColumns(keys) {
   const columns = {};
@@ -162,7 +162,9 @@ export class SessionData {
     for (const [id, columns] of this.ranges) {
       const i = lastIndexAtOrBefore(columns.seq, seq);
       if (i >= 0 && columns.seq[i] === seq) {
-        result.set(id, { t: columns.t[i], seq, d: columns.d[i], st: columns.st[i], el: columns.el[i] });
+        result.set(id, {
+          t: columns.t[i], seq, d: columns.d[i], st: columns.st[i], el: columns.el[i], kf: columns.kf[i],
+        });
       }
     }
     return result;

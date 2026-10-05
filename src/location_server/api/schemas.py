@@ -253,13 +253,19 @@ class FixColumnsOut(BaseModel):
 
 
 class RangeColumnsOut(BaseModel):
-    """アンカー 1 台ぶんの測距の列。`d` はメートルで、失敗 (`st != 0`) は null。`el` は elapsed_ms。"""
+    """アンカー 1 台ぶんの測距の列。`d` はメートルで、失敗 (`st != 0`) は null。`el` は elapsed_ms。
+
+    `kf` はその測距をタグ側のカルマンフィルタがどう扱ったか。0 = 使っていない (測距の失敗、負の値で
+    解から外した、フィルタが無効、そのサイクルで最小二乗の解から初期化した、アンカーの真下にいて飛ばした)、
+    1 = 取り込んだ、2 = イノベーションのゲートで棄却した。パケット形式 version 2 までに記録した行は null。
+    """
 
     t: list[int]
     seq: list[int]
     d: list[float | None]
     st: list[int]
     el: list[int | None]
+    kf: list[int | None]
 
 
 class DecimationOut(BaseModel):

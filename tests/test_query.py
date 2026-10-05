@@ -2,15 +2,21 @@
 
 from __future__ import annotations
 
+import sqlite3
+import threading
 from dataclasses import replace
 from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
 
+from location_server.api.schemas import RangeColumnsOut
 from location_server.ingest.packet import (
     FIX_FLAG_KF_INIT,
     FIX_FLAG_KF_OK,
+    RANGE_KF_ACCEPTED,
+    RANGE_KF_REJECTED,
+    RANGE_KF_UNUSED,
     CycleRecord,
     RangeRecord,
     TelemetryPacket,
@@ -26,8 +32,10 @@ RECV_AT = "2026-09-30T00:00:00+00:00"
 def _failed_cycle(seq: int, t_tag_ms: int, *, kf_predicted: bool = False) -> CycleRecord:
     """測位に失敗し、0x0101 の測距も失敗したサイクル。
 
-    `kf_predicted` が偽ならフィルタも無効、真ならフィルタは予測だけで進み、測距を 3 本棄却している。
+    `kf_predicted` が偽ならフィルタも無効、真ならフィルタは予測だけで進み、成功した 3 本の測距を
+    すべてゲートで棄却している。
     """
+    rejected = RANGE_KF_REJECTED if kf_predicted else RANGE_KF_UNUSED
     return CycleRecord(
         seq=seq,
         t_tag_ms=t_tag_ms,
@@ -43,7 +51,10 @@ def _failed_cycle(seq: int, t_tag_ms: int, *, kf_predicted: bool = False) -> Cyc
         kf_sigma_mm=80 if kf_predicted else 0,
         kf_used=0,
         kf_rejected=3 if kf_predicted else 0,
-        ranges=tuple(RangeRecord(a, 3 if a == 0x0101 else 0, 9, 0 if a == 0x0101 else 2000) for a in ANCHORS),
+        ranges=tuple(
+            RangeRecord(a, 3, 9, 0, RANGE_KF_UNUSED) if a == 0x0101 else RangeRecord(a, 0, 9, 2000, rejected)
+            for a in ANCHORS
+        ),
     )
 
 
@@ -51,6 +62,7 @@ def _populate(store: TelemetryStore) -> int:
     """seq 0..7 は成功、8..11 は欠番、12..15 のうち 12 と 13 は測位失敗のセッションを書く。
 
     フィルタは seq 12 で無効、13 で予測のみ、14 で最小二乗の解から初期化し、ほかは観測で更新している。
+    測距ごとの kf はタグと同じく、観測で更新したサイクルだけ取り込み (13 は棄却) とし、ほかは使っていない。
     """
     good = make_packet(seq=0, t_tag_ms=1000, count=8, period_ms=100)
     tail = make_packet(seq=12, t_tag_ms=2200, count=4, period_ms=100)
@@ -64,7 +76,11 @@ def _populate(store: TelemetryStore) -> int:
         cycles=(
             _failed_cycle(12, 2200),
             _failed_cycle(13, 2300, kf_predicted=True),
-            replace(tail.cycles[2], fix_flags=tail.cycles[2].fix_flags | FIX_FLAG_KF_INIT),
+            replace(
+                tail.cycles[2],
+                fix_flags=tail.cycles[2].fix_flags | FIX_FLAG_KF_INIT,
+                ranges=tuple(replace(r, kf=RANGE_KF_UNUSED) for r in tail.cycles[2].ranges),
+            ),
             tail.cycles[3],
         ),
     )
@@ -188,6 +204,23 @@ def test_ranges_all_anchors(client: TestClient, populated: int) -> None:
     assert a1["st"][8:10] == [3, 3]
     assert a1["d"][0] == 1.1
     assert payload["decimation"]["0x0101"] == {"total": 12, "stride": 1}
+    # 測距ごとのフィルタでの扱い。seq 12..15 は無効、棄却 (0x0101 は測距の失敗)、初期化、取り込み
+    accepted, unused, rejected = RANGE_KF_ACCEPTED, RANGE_KF_UNUSED, RANGE_KF_REJECTED
+    assert a1["kf"] == [accepted] * 8 + [unused, unused, unused, accepted]
+    assert payload["ranges"]["0x0100"]["kf"] == [accepted] * 8 + [unused, rejected, unused, accepted]
+
+
+def test_ranges_kf_is_null_for_rows_without_it(conn: sqlite3.Connection) -> None:
+    # 測距の kf を足す前 (パケット形式 version 2 まで) に書いた行は NULL のまま返す
+    lock = threading.Lock()
+    session_id = _write(TelemetryStore(conn, lock), make_packet(seq=0, t_tag_ms=1000, count=2))
+    conn.execute("UPDATE range_sample SET kf = NULL WHERE seq = 0")
+    result = QueryStore(conn, lock).ranges(
+        session_id, anchor_id=0x0100, from_ms=None, to_ms=None, max_points=100
+    )
+    columns = result[0x0100].data.anchors[0x0100].to_json()
+    assert columns["kf"] == [None, RANGE_KF_ACCEPTED]
+    assert RangeColumnsOut.model_validate(columns).kf == [None, RANGE_KF_ACCEPTED]
 
 
 def test_ranges_single_anchor_with_decimation(client: TestClient, populated: int) -> None:
