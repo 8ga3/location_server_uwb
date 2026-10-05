@@ -331,7 +331,7 @@ class QueryStore:
                 -- アンカーごとに展開すると、折り返した後に初めて現れたアンカーだけ 2^32 ずれるため。
                 -- 測距行は同じサイクルの測位行と同じトランザクションで書くので、対応する行は必ずある
                 m AS (
-                    SELECT rs.anchor_id, rs.status, rs.distance_mm, rs.elapsed_ms, n.seq_n, n.t_n
+                    SELECT rs.anchor_id, rs.status, rs.distance_mm, rs.elapsed_ms, rs.kf, n.seq_n, n.t_n
                     FROM range_sample AS rs JOIN n ON n.seq = rs.seq
                     WHERE rs.session_id = :session_id AND (:anchor_id IS NULL OR rs.anchor_id = :anchor_id)
                 ),
@@ -359,6 +359,7 @@ class QueryStore:
                 status=row["status"],
                 distance_mm=row["distance_mm"],
                 elapsed_ms=row["elapsed_ms"],
+                kf=row["kf"],
             )
         return result
 

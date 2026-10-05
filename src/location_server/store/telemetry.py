@@ -216,8 +216,8 @@ class TelemetryStore:
         cursor = self._conn.executemany(
             """
             INSERT OR IGNORE INTO range_sample
-                (session_id, seq, t_tag_ms, anchor_id, status, distance_mm, elapsed_ms)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+                (session_id, seq, t_tag_ms, anchor_id, status, distance_mm, elapsed_ms, kf)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 (
@@ -228,6 +228,7 @@ class TelemetryStore:
                     r.status,
                     r.distance_mm if r.ok else None,
                     r.elapsed_ms,
+                    r.kf,
                 )
                 for r in cycle.ranges
             ],

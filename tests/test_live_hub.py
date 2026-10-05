@@ -8,7 +8,13 @@ from typing import Any
 
 import pytest
 
-from location_server.ingest.packet import FIX_FLAG_KF_OK, RangeRecord, TelemetryPacket
+from location_server.ingest.packet import (
+    FIX_FLAG_KF_OK,
+    RANGE_KF_ACCEPTED,
+    RANGE_KF_UNUSED,
+    RangeRecord,
+    TelemetryPacket,
+)
 from location_server.live import LiveHub, Subscriber, SubscriberOverflowError
 from location_server.live.hub import END_NEW_SESSION, END_TAG_LAST, END_TIMEOUT
 from telemetry_helpers import make_packet
@@ -82,6 +88,8 @@ def test_publish_then_tick_sends_session_start_and_append() -> None:
     assert append["fix"]["krej"] == [0] * 4
     assert set(append["ranges"]) == {"0x0100", "0x0101", "0x0102", "0x0103"}
     assert append["ranges"]["0x0101"]["d"] == [1.1] * 4
+    # 測距ごとのフィルタでの扱いも、受信したパケットの値をそのまま載せる
+    assert append["ranges"]["0x0101"]["kf"] == [RANGE_KF_ACCEPTED] * 4
     # 次の tick までに新しいサイクルが無ければ何も送らない
     hub.tick()
     assert _drain(sub) == []
@@ -309,7 +317,7 @@ def test_failed_fix_and_failed_range_are_null() -> None:
                 kf_sigma_mm=0,
                 kf_used=0,
                 kf_rejected=0,
-                ranges=(RangeRecord(0x0100, 3, 7, 0), *cycle.ranges[1:]),
+                ranges=(RangeRecord(0x0100, 3, 7, 0, RANGE_KF_UNUSED), *cycle.ranges[1:]),
             ),
         ),
     )
@@ -325,7 +333,14 @@ def test_failed_fix_and_failed_range_are_null() -> None:
     assert snapshot["fix"]["kx"] == [None]
     assert snapshot["fix"]["ksig"] == [None]
     assert (snapshot["fix"]["kused"], snapshot["fix"]["krej"]) == ([0], [0])
-    assert snapshot["ranges"]["0x0100"] == {"t": [1000], "seq": [0], "d": [None], "st": [3], "el": [7]}
+    assert snapshot["ranges"]["0x0100"] == {
+        "t": [1000],
+        "seq": [0],
+        "d": [None],
+        "st": [3],
+        "el": [7],
+        "kf": [RANGE_KF_UNUSED],
+    }
 
 
 def test_millis_and_seq_wrap_are_unrolled() -> None:

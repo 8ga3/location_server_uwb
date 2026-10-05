@@ -6,6 +6,8 @@ from location_server.ingest.packet import (
     FIX_FLAG_KF_OK,
     FIX_FLAG_KF_UPDATED,
     FIX_FLAG_OK,
+    RANGE_KF_ACCEPTED,
+    RANGE_KF_UNUSED,
     CycleRecord,
     RangeRecord,
     TelemetryPacket,
@@ -23,9 +25,13 @@ def make_cycle(
     kf_updated: bool = True,
     anchors: tuple[int, ...] = ANCHORS,
 ) -> CycleRecord:
-    """測距がすべて成功したサイクル。既定では最小二乗が解け、フィルタも観測で更新されている。"""
+    """測距がすべて成功したサイクル。既定では最小二乗が解け、フィルタも観測で更新されている。
+
+    フィルタが観測で更新したサイクルでは全測距を取り込んだことにし、それ以外は使っていないことにする。
+    """
+    range_kf = RANGE_KF_ACCEPTED if kf_ok and kf_updated else RANGE_KF_UNUSED
     ranges = tuple(
-        RangeRecord(anchor_id=a, status=0, elapsed_ms=6, distance_mm=1000 + i * 100)
+        RangeRecord(anchor_id=a, status=0, elapsed_ms=6, distance_mm=1000 + i * 100, kf=range_kf)
         for i, a in enumerate(anchors)
     )
     fix_flags = 0

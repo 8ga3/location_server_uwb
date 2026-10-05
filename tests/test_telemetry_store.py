@@ -13,6 +13,8 @@ from location_server.ingest.packet import (
     FIX_FLAG_KF_OK,
     FIX_FLAG_KF_UPDATED,
     FIX_FLAG_OK,
+    RANGE_KF_ACCEPTED,
+    RANGE_KF_UNUSED,
     CycleRecord,
     RangeRecord,
     TelemetryPacket,
@@ -60,6 +62,7 @@ def test_rows_keep_values(conn: sqlite3.Connection, telemetry: TelemetryStore) -
     assert (fix["kf_used"], fix["kf_rejected"]) == (4, 0)
     rng = conn.execute("SELECT * FROM range_sample WHERE anchor_id = 0x0101").fetchone()
     assert (rng["seq"], rng["status"], rng["distance_mm"], rng["elapsed_ms"]) == (7, 0, 1100, 6)
+    assert rng["kf"] == RANGE_KF_ACCEPTED
 
 
 def test_failed_fix_and_range_store_null(conn: sqlite3.Connection, telemetry: TelemetryStore) -> None:
@@ -78,7 +81,7 @@ def test_failed_fix_and_range_store_null(conn: sqlite3.Connection, telemetry: Te
         kf_sigma_mm=0,
         kf_used=0,
         kf_rejected=0,
-        ranges=(RangeRecord(0x0100, status=11, elapsed_ms=9, distance_mm=0),),
+        ranges=(RangeRecord(0x0100, status=11, elapsed_ms=9, distance_mm=0, kf=RANGE_KF_UNUSED),),
     )
     packet = TelemetryPacket(flags=0, tag_id=2, boot_id=1, seq=0, t_tag_ms=0, anchor_n=1, cycles=(cycle,))
     telemetry.write_packets([_received(packet)])
@@ -86,7 +89,7 @@ def test_failed_fix_and_range_store_null(conn: sqlite3.Connection, telemetry: Te
     assert fix["ok"] == 0
     assert (fix["x_mm"], fix["y_mm"], fix["z_mm"], fix["method"]) == (None, None, None, None)
     rng = conn.execute("SELECT * FROM range_sample").fetchone()
-    assert (rng["status"], rng["distance_mm"], rng["elapsed_ms"]) == (11, None, 9)
+    assert (rng["status"], rng["distance_mm"], rng["elapsed_ms"], rng["kf"]) == (11, None, 9, RANGE_KF_UNUSED)
 
 
 def test_failed_fix_keeps_valid_filter(conn: sqlite3.Connection, telemetry: TelemetryStore) -> None:

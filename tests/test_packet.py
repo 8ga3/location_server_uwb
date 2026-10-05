@@ -17,6 +17,9 @@ from location_server.ingest.packet import (
     HEADER,
     MAGIC,
     RANGE,
+    RANGE_KF_ACCEPTED,
+    RANGE_KF_REJECTED,
+    RANGE_KF_UNUSED,
     VERSION,
     DropReason,
     PacketDecodeError,
@@ -82,13 +85,17 @@ def _reason(data: bytes) -> DropReason:
 
 
 def test_sizes_match_design() -> None:
-    assert VERSION == 2
+    assert VERSION == 3
     assert HEADER.size == 24
     assert CYCLE.size == 30
-    assert RANGE.size == 8
-    # アンカー 4 台・4 サイクルで 272 バイト、count = 16 で 1016 バイト (設計文書 6.2)
-    assert packet_size(4, 4) == 272
-    assert packet_size(16, 4) == 1016
+    assert RANGE.size == 9
+    # アンカー 4 台・4 サイクルで 288 バイト、count = 16 で 1080 バイト (設計文書 6.2)
+    assert packet_size(4, 4) == 288
+    assert packet_size(16, 4) == 1080
+
+
+def test_range_kf_values() -> None:
+    assert (RANGE_KF_UNUSED, RANGE_KF_ACCEPTED, RANGE_KF_REJECTED) == (0, 1, 2)
 
 
 def test_fix_flags_known_bits() -> None:
@@ -116,11 +123,11 @@ def test_decode_hand_built_packet() -> None:
             kf_used=1,
             kf_rejected=1,
         )
-        + RANGE.pack(0x0100, 0, 7, 3210)
-        + RANGE.pack(0x0101, 11, 255, 0)
+        + RANGE.pack(0x0100, 0, 7, 3210, RANGE_KF_ACCEPTED)
+        + RANGE.pack(0x0101, 11, 255, 0, RANGE_KF_UNUSED)
         + _cycle(dt_ms=50, fix_flags=FIX_FLAG_KF_OK, kf_x_mm=1, kf_y_mm=2, kf_z_mm=3, kf_sigma_mm=80)
-        + RANGE.pack(0x0100, 0, 6, 3200)
-        + RANGE.pack(0x0101, 0, 6, 4100)
+        + RANGE.pack(0x0100, 0, 6, 3200, RANGE_KF_REJECTED)
+        + RANGE.pack(0x0101, 0, 6, 4100, RANGE_KF_REJECTED)
     )
     packet = decode_packet(data)
     assert (packet.tag_id, packet.boot_id, packet.seq, packet.anchor_n) == (1, 0x12345678, 100, 2)
@@ -139,6 +146,9 @@ def test_decode_hand_built_packet() -> None:
     assert (second.kf_x_mm, second.kf_y_mm, second.kf_z_mm, second.kf_sigma_mm) == (1, 2, 3, 80)
     assert first.ranges[0].ok and first.ranges[0].distance_mm == 3210
     assert not first.ranges[1].ok and first.ranges[1].status == 11 and first.ranges[1].elapsed_ms == 255
+    # 測距ごとのフィルタでの扱い
+    assert [r.kf for r in first.ranges] == [RANGE_KF_ACCEPTED, RANGE_KF_UNUSED]
+    assert [r.kf for r in second.ranges] == [RANGE_KF_REJECTED, RANGE_KF_REJECTED]
     assert packet.row_count == 6
 
 
@@ -181,9 +191,9 @@ def test_round_trip_keeps_filter_fields() -> None:
     assert decoded.cycles[0].kf_sigma_mm == 65535
 
 
-def test_encode_produces_version_2() -> None:
+def test_encode_produces_version_3() -> None:
     data = encode_packet(make_packet(count=1))
-    assert data[4] == 2
+    assert data[4] == 3
     assert len(data) == packet_size(1, 4)
 
 
@@ -208,7 +218,7 @@ def test_rejects_bad_magic() -> None:
     assert _reason(_header(magic=0x12345678) + b"\x00" * 24) is DropReason.BAD_MAGIC
 
 
-@pytest.mark.parametrize("version", [0, 1, 3, 255])
+@pytest.mark.parametrize("version", [0, 1, 2, 4, 255])
 def test_rejects_bad_version(version: int) -> None:
     assert _reason(_header(version=version) + b"\x00" * 24) is DropReason.BAD_VERSION
 
@@ -216,8 +226,16 @@ def test_rejects_bad_version(version: int) -> None:
 def test_rejects_version_1_packet() -> None:
     # version 1 のサイクルレコード (16 バイト) で組んだパケットは、長さを見る前に version で捨てる
     v1_cycle = struct.pack("<HBBiihH", 0, 0x01, 1, 1000, 2000, 1000, 42)
-    data = _header(version=1) + v1_cycle + RANGE.pack(0x0100, 0, 6, 1000)
+    data = _header(version=1) + v1_cycle + struct.pack("<HBBi", 0x0100, 0, 6, 1000)
     assert _reason(data) is DropReason.BAD_VERSION
+
+
+def test_rejects_version_2_packet() -> None:
+    # version 2 の測距レコード (kf の無い 8 バイト) で組んだパケットも、長さを見る前に version で捨てる
+    data = _header(version=2) + _cycle() + struct.pack("<HBBi", 0x0100, 0, 6, 1000)
+    assert _reason(data) is DropReason.BAD_VERSION
+    # version だけを 3 に書き換えても、測距レコードが 1 バイト足りないので長さで捨てる
+    assert _reason(_header() + data[HEADER.size :]) is DropReason.LENGTH_MISMATCH
 
 
 @pytest.mark.parametrize("tag_id", [0, 0x0100, 0xFFFF])
@@ -235,8 +253,8 @@ def test_rejects_zero_anchor_n() -> None:
 
 
 def test_rejects_length_mismatch() -> None:
-    body = _cycle() + RANGE.pack(0x0100, 0, 0, 0)
-    assert len(body) == 30 + 8
+    body = _cycle() + RANGE.pack(0x0100, 0, 0, 0, 0)
+    assert len(body) == 30 + 9
     assert decode_packet(_header() + body).cycles
     assert _reason(_header() + body[:-1]) is DropReason.LENGTH_MISMATCH
     assert _reason(_header() + body + b"\x00") is DropReason.LENGTH_MISMATCH
@@ -249,8 +267,37 @@ def test_rejects_length_mismatch() -> None:
 
 @pytest.mark.parametrize("anchor_id", [0x0000, 0x00FF, 0xFFFF])
 def test_rejects_out_of_range_anchor_id(anchor_id: int) -> None:
-    data = _header() + _cycle() + RANGE.pack(anchor_id, 0, 0, 0)
+    data = _header() + _cycle() + RANGE.pack(anchor_id, 0, 0, 0, 0)
     assert _reason(data) is DropReason.BAD_ANCHOR_ID
+
+
+@pytest.mark.parametrize("kf", [3, 0x80, 0xFF])
+def test_rejects_reserved_range_kf(kf: int) -> None:
+    good = _cycle() + RANGE.pack(0x0100, 0, 6, 1000, RANGE_KF_REJECTED) + RANGE.pack(0x0101, 0, 6, 1000, 0)
+    bad = (
+        _cycle(dt_ms=50)
+        + RANGE.pack(0x0100, 0, 6, 1000, RANGE_KF_ACCEPTED)
+        + RANGE.pack(0x0101, 0, 6, 1000, kf)
+    )
+    assert decode_packet(_header(anchor_n=2) + good).cycles
+    # 2 番目のサイクルの 2 本目だけが予約値でも、パケットを丸ごと捨てる
+    with pytest.raises(PacketDecodeError) as info:
+        decode_packet(_header(count=2, anchor_n=2) + good + bad)
+    assert info.value.reason is DropReason.BAD_RESERVED
+    assert f"cycle=1 anchor_id=0x0101 kf={kf}" in info.value.detail
+
+
+def test_range_kf_round_trip() -> None:
+    packet = make_packet(count=2)
+    kinds = (RANGE_KF_UNUSED, RANGE_KF_ACCEPTED, RANGE_KF_REJECTED, RANGE_KF_ACCEPTED)
+    cycles = tuple(
+        replace(cycle, ranges=tuple(replace(r, kf=k) for r, k in zip(cycle.ranges, kinds, strict=True)))
+        for cycle in packet.cycles
+    )
+    packet = replace(packet, cycles=cycles)
+    decoded = decode_packet(encode_packet(packet))
+    assert decoded == packet
+    assert [r.kf for r in decoded.cycles[1].ranges] == list(kinds)
 
 
 def test_encode_rejects_non_consecutive_seq() -> None:
@@ -270,20 +317,20 @@ def test_encode_rejects_non_consecutive_seq() -> None:
 
 @pytest.mark.parametrize("flags", [0x02, 0x80, 0xFF])
 def test_rejects_unknown_flags(flags: int) -> None:
-    body = _cycle() + RANGE.pack(0x0100, 0, 0, 0)
+    body = _cycle() + RANGE.pack(0x0100, 0, 0, 0, 0)
     assert _reason(_header(flags=flags) + body) is DropReason.BAD_RESERVED
 
 
 def test_rejects_nonzero_reserved() -> None:
-    body = _cycle() + RANGE.pack(0x0100, 0, 0, 0)
+    body = _cycle() + RANGE.pack(0x0100, 0, 0, 0, 0)
     header = HEADER.pack(MAGIC, VERSION, 0, 1, 0, 0, 0, 1, 1, 0x0001)
     assert _reason(header + body) is DropReason.BAD_RESERVED
 
 
 @pytest.mark.parametrize("fix_flags", [0x20, 0x40, 0x80, 0xFF])
 def test_rejects_reserved_fix_flags(fix_flags: int) -> None:
-    good = _cycle(fix_flags=FIX_FLAGS_KNOWN) + RANGE.pack(0x0100, 0, 0, 0)
-    bad = _cycle(dt_ms=50, fix_flags=fix_flags) + RANGE.pack(0x0100, 0, 0, 0)
+    good = _cycle(fix_flags=FIX_FLAGS_KNOWN) + RANGE.pack(0x0100, 0, 0, 0, 0)
+    bad = _cycle(dt_ms=50, fix_flags=fix_flags) + RANGE.pack(0x0100, 0, 0, 0, 0)
     assert decode_packet(_header() + good).cycles
     # 2 番目のサイクルだけが予約ビットを立てていても、パケットを丸ごと捨てる
     with pytest.raises(PacketDecodeError) as info:
