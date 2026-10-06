@@ -29,7 +29,7 @@ UWB 測位のデバッグ・精度評価に使うサーバーである。アン�
 | A | SQLite スキーマ、構成配信 API、アンカー管理 API、座標入力 CLI | 実装済み |
 | B | UDP によるテレメトリ収集、セッション開始通知、UDP ダンパ | 実装済み。実機で測定済み (AP 切断後に再接続する瞬間の周期のみ未確認) |
 | C | ライブ配信 (WebSocket)、参照 API、可視化ページ | 実装済み。実機のタグでライブ表示を確認済み (既知座標での静的試験と、走行中の遅延の測定は未実施) |
-| D | self-survey 連携 | アンカーの一括置換 API (`POST /api/v1/anchors:bulk`) のみ先行して実装済み |
+| D | self-survey 連携 | アンカーの一括置換 API (`POST /api/v1/anchors:bulk`) と座標推定 CLI (`tools/survey_solve.py`) を実装済み。実機の survey の結果での投入は未実施 |
 
 フェーズ A の「タグ側の Wi-Fi 取得 + NVS キャッシュ」と、フェーズ B の「タグ側のリングバッファと UDP 送信」
 「測距ループと Wi-Fi 監視のコア分離」はファームウェア側の作業であり、このリポジトリには含まれない。
@@ -142,6 +142,31 @@ uv run python tools/anchor_cli.py config
 
 接続先は `--server` または環境変数 `UWB_SERVER_URL` で変えられる。
 `UWB_AUTH_TOKEN` を設定してサーバーを起動している場合は、CLI 側にも同じ環境変数か `--token` を与える。
+
+### アンカー間の相互測距から座標を推定する (self-survey)
+
+`tools/survey_solve.py` は、アンカーどうしの相互測距のログから座標を推定し、`apply` に渡せる座標表を書き出す。
+サーバーには接続せず、追加の依存もない。手順の詳細は
+[doc/multi-anchor-positioning-design.md](doc/multi-anchor-positioning-design.md) の 4 章を参照。
+
+1. PC につないだアンカーのシリアルモニタで `survey 256 257 258 259` (アンカー ID を 10 進で並べる) を送り、
+   出力をファイルに保存する (ファームウェア側の README を参照)
+2. ログから座標を推定する。`--reference` には手測りの座標表を渡す。高さ (z) はここから取り、推定結果との差も出す
+
+   ```sh
+   uv run python tools/survey_solve.py survey.log --reference rooms/room-1.json --out survey.json
+   ```
+
+3. 残差や手測りとの差を確かめてから、`apply` で投入する
+
+   ```sh
+   uv run python tools/anchor_cli.py apply survey.json --dry-run
+   ```
+
+- 推定するのは水平位置 (x, y) と、全ての測距に共通するバイアス `b`。`b` は座標表には入らない
+- アンカーが 4 台だと冗長度が 0 になり、残差では測距の誤りを見つけられない。`--fixed-bias-mm` で `b` を
+  固定すると冗長度が 1 残る
+- 残差の大きい組は `--exclude 0x0100-0x0102` で外して計算し直せる
 
 ## テレメトリの収集
 
