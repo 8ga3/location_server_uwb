@@ -1148,7 +1148,9 @@ AtomS3R のタグ 1 台、アンカー 4 台、`RANGE_CYCLE_MS = 200` (5 Hz、1 
 
 - [x] `POST /api/v1/anchors:bulk` を実装 (5.3)。座標表ファイルを投入する `tools/anchor_cli.py apply` を含む。
   部屋を移るたびの座標表の入れ替えに使うため、このフェーズの他の項目に先行して実装した
-- [ ] `POST /api/v1/anchors:bulk` で MDS スクリプトの結果を投入
+- [ ] `POST /api/v1/anchors:bulk` で MDS スクリプトの結果を投入。スクリプト (`tools/survey_solve.py`) は実装済みで、
+  `--out` で書き出した座標表 (`source: survey`) を `tools/anchor_cli.py apply` で投入する。実機の survey の結果での
+  投入はまだ行っていない ([multi-anchor-positioning-design.md](multi-anchor-positioning-design.md) の 4.2)
 - [ ] バイアス `b` の推定値を `config_meta.bias_mm` へ反映
 - [ ] survey の残差をサーバー側に保存し、履歴として比較できるようにする
 
