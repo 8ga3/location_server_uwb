@@ -557,6 +557,81 @@ LED を青にする。
 | `A` 応答 | 要求の受け手 → 送り手 | 応答した要求の種類とシーケンス番号 |
 | `E` 終了 | コーディネータ → 全体 | なし |
 
+コーディネータ (0x0100) とアンカー 2 台 (0x0101、0x0102) の場合のシーケンスを次に示す。測距の組は、
+要求側 i と応答側 j のどちらがコーディネータかで流れが 3 通りに分かれるので、それぞれ 1 組ずつ載せた。
+応答 (SVA) が来ないときの送り直しは省いている。
+
+```mermaid
+%%{init: {'theme':'base','themeVariables':{'background':'#f6f8fa','primaryColor':'#ffffff','primaryTextColor':'#1f2933','primaryBorderColor':'#2e86c1','mainBkg':'#ffffff','nodeBorder':'#2e86c1','nodeTextColor':'#1f2933','lineColor':'#6b7785','textColor':'#6b7785','edgeLabelBackground':'#f6f8fa','clusterBkg':'#e8eef4','clusterBorder':'#9aa5b1','titleColor':'#1f2933','fontSize':'14px','actorBkg':'#ffffff','actorBorder':'#2e86c1','actorTextColor':'#1f2933','actorLineColor':'#9aa5b1','signalColor':'#6b7785','signalTextColor':'#6b7785','labelBoxBkgColor':'#e8eef4','labelBoxBorderColor':'#9aa5b1','labelTextColor':'#1f2933','loopTextColor':'#6b7785','noteBkgColor':'#fdf3d7','noteBorderColor':'#c9a227','noteTextColor':'#1f2933','activationBkgColor':'#eaf2f8','activationBorderColor':'#2e86c1','sequenceNumberColor':'#ffffff'}}}%%
+sequenceDiagram
+    participant PC
+    participant C as コーディネータ<br/>0x0100
+    participant A as アンカー<br/>0x0101
+    participant B as アンカー<br/>0x0102
+
+    PC->>C: survey 256 257 258 (シリアル)
+
+    Note over C,B: フェーズ 0: 起床と在否の確認
+    loop 10 ms 間隔で 1.5 秒 (ブロードキャスト)
+        C-)A: SVW 起床ビーコン<br/>src=0xFFFF, seq=0xA5
+        C-)B: SVW 起床ビーコン
+    end
+    Note over A,B: 通常の応答ループが返す RangeFrameMismatch の<br/>送信元とシーケンス番号で起床ビーコンと判断し、<br/>survey モードへ入る (LED 青)
+    C->>A: SVP 在否の確認
+    A-->>C: SVA 応答 (P)
+    C->>B: SVP 在否の確認
+    B-->>C: SVA 応答 (P)
+    Note over C,B: 応答の無いアンカーには SVW を 1 秒送り直して確かめ直す (3 回まで)
+
+    Note over C,B: フェーズ 1: 相互測距 (全ての順序付きの組を 1 組ずつ)
+
+    Note over C,A: 組 0x0100 → 0x0101 (i がコーディネータ自身)
+    C->>A: SVR 応答ループへ入る要求 (試行の上限 2n)
+    A-->>C: SVA 応答 (R)
+    loop 成功 n 回か、試行 2n 回まで
+        C->>A: Poll
+        A->>C: Response
+        C->>A: Final
+        A->>C: 距離通知
+    end
+    Note over A: Poll が 300 ms 途絶えたら<br/>制御フレームの待ちへ戻る
+    C->>PC: SURVEY_PAIR,i=0x0100,j=0x0101,...
+
+    Note over C,B: 組 0x0101 → 0x0102 (i も j もコーディネータ以外)
+    C->>A: SVI 測距の指示 (j=0x0102, n)
+    A-->>C: SVA 応答 (I)
+    A->>B: SVR 応答ループへ入る要求
+    B-->>A: SVA 応答 (R)
+    A->>B: DS-TWR (Poll / Response / Final / 距離通知) × 最大 2n 回
+    A->>C: SVD 測距の報告 (状態、試行回数、成功回数、測距値)
+    C-->>A: SVA 応答 (D)
+    C->>PC: SURVEY_PAIR,i=0x0101,j=0x0102,...
+
+    Note over C,A: 組 0x0101 → 0x0100 (j がコーディネータ)
+    C->>A: SVI 測距の指示 (j=0x0100, n)
+    A-->>C: SVA 応答 (I)
+    A->>C: SVR 応答ループへ入る要求
+    Note over C: 報告を待つ途中で応答ループに入る
+    C-->>A: SVA 応答 (R)
+    A->>C: DS-TWR × 最大 2n 回
+    A->>C: SVD 測距の報告
+    C-->>A: SVA 応答 (D)
+    C->>PC: SURVEY_PAIR,i=0x0101,j=0x0100,...
+
+    Note over C,B: 残りの組 (0x0100→0x0102、0x0102→0x0100、0x0102→0x0101) も同じ
+
+    Note over C,B: 終了
+    loop 10 回 (ブロードキャスト)
+        C-)A: SVE 終了
+        C-)B: SVE 終了
+    end
+    Note over A,B: 通常の応答ループへ戻る<br/>(SVE を受けそこねても、survey のフレームが 15 秒途絶えれば戻る)
+    C->>PC: SURVEY_END,pairs=6,ok_pairs=6,...
+```
+
+実線の矢印は応答を求める要求と DS-TWR のフレーム、点線の矢印は応答 (SVA)、開いた矢じりの矢印は
+応答を求めないブロードキャスト (SVW / SVE) を表す。
+
 - 応答を求める要求 (`P` / `I` / `R` / `D`) は、応答が来るまで 50 ms 間隔で 10 回まで送り直す。
   直前の組で j だったアンカーは 300 ms のあいだ応答ループに残り、制御フレームを受けられない。
   送り直しの合計 (500 ms) はそれより長くしてある。測距の指示 (`I`) への応答が失われて同じ指示が
