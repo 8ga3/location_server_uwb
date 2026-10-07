@@ -53,7 +53,9 @@ def test_subscribe_receives_snapshot_with_anchors(client: TestClient) -> None:
     assert snapshot["session_id"] is None
     assert snapshot["history_ms"] == 30000
     assert snapshot["anchors_rev"] == 2
-    assert snapshot["anchors"] == [{"id": "0x0100", "label": "北西の柱", "x": 0.0, "y": 0.0, "z": 1.8}]
+    assert snapshot["anchors"] == [
+        {"id": "0x0100", "label": "北西の柱", "x": 0.0, "y": 0.0, "z": 1.8, "source": "manual"}
+    ]
 
 
 def test_live_session_flow(client: TestClient) -> None:

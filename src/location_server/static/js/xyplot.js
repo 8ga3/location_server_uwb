@@ -361,9 +361,16 @@ export class XYPlot {
       ctx.strokeStyle = colors.fg;
       ctx.lineWidth = 1;
       ctx.strokeRect(px - 6, py - 6, 12, 12);
+      // self-survey で推定した座標は、手測りの座標と見分けられるよう破線の外枠を足し、名前にも書き添える
+      const survey = anchor.source === "survey";
+      if (survey) {
+        ctx.setLineDash([3, 2]);
+        ctx.strokeRect(px - 10, py - 10, 20, 20);
+        ctx.setLineDash([]);
+      }
       ctx.fillStyle = colors.fg;
       const name = anchor.label ? `${anchor.id} ${anchor.label}` : anchor.id;
-      ctx.fillText(name, px + 9, py - 4);
+      ctx.fillText(survey ? `${name} (survey)` : name, px + (survey ? 13 : 9), py - 4);
     }
   }
 

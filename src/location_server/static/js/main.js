@@ -115,6 +115,13 @@ function renderAnchorTable(headers, rows) {
       swatch.style.background = state.colors.get(id) ?? "#888";
       const anchor = data.anchorById(id);
       name.append(swatch, anchor?.label ? `${id} ${anchor.label}` : id);
+      if (anchor?.source === "survey") {
+        const tag = document.createElement("span");
+        tag.className = "tag";
+        tag.textContent = "survey";
+        tag.title = "self-survey で推定した座標";
+        name.append(tag);
+      }
       tr.append(name);
       for (const [text, lamp] of cells) {
         const td = document.createElement("td");
@@ -341,12 +348,16 @@ function renderLiveSummaryThrottled(now) {
 }
 
 // 座標表の表示。サーバーはセッションの構成リビジョンがわからないか、この DB に無い場合に現在の構成を返すので、
-// セッションのリビジョンと実際に使った座標表のリビジョンが違えばそれとわかるように書く
-function configLabel(sessionRev, anchorsRev) {
+// セッションのリビジョンと実際に使った座標表のリビジョンが違えばそれとわかるように書く。
+// self-survey で推定した座標が含まれていれば、その台数を添えて手測りの座標表と見分けられるようにする
+function configLabel(sessionRev, anchorsRev, anchors) {
   if (anchorsRev === null || anchorsRev === undefined) return "--";
-  if (sessionRev === null || sessionRev === undefined) return `rev ${anchorsRev} (現在の構成)`;
-  if (sessionRev !== anchorsRev) return `rev ${anchorsRev} (現在の構成。rev ${sessionRev} が無い)`;
-  return `rev ${anchorsRev}`;
+  const list = anchors ?? [];
+  const surveyed = list.filter((a) => a.source === "survey").length;
+  const suffix = surveyed > 0 ? `、survey ${surveyed}/${list.length} 台` : "";
+  if (sessionRev === null || sessionRev === undefined) return `rev ${anchorsRev} (現在の構成${suffix})`;
+  if (sessionRev !== anchorsRev) return `rev ${anchorsRev} (現在の構成。rev ${sessionRev} が無い${suffix})`;
+  return surveyed > 0 ? `rev ${anchorsRev} (survey ${surveyed}/${list.length} 台)` : `rev ${anchorsRev}`;
 }
 
 function renderLiveSummary() {
@@ -356,7 +367,7 @@ function renderLiveSummary() {
   renderStats($("summary"), [
     ["セッション", info.session_id === null ? "--" : `#${info.session_id}`],
     ["boot_id", hex(info.boot_id, 8)],
-    ["座標表", configLabel(info.config_rev, data.anchorsRev), info.config_rev !== null && info.config_rev !== data.anchorsRev],
+    ["座標表", configLabel(info.config_rev, data.anchorsRev, data.anchors), info.config_rev !== null && info.config_rev !== data.anchorsRev],
     ["状態", info.boot_id === null ? "受信待ち" : info.active ? "受信中" : "終了", !info.active && info.boot_id !== null],
     ["測位レート (1 秒)", ind ? num(ind.fixRateHz, 1, " Hz") : "--"],
     ["サイクル (1 秒)", ind ? num(ind.cycleRateHz, 1, " Hz") : "--"],
@@ -522,7 +533,7 @@ function renderReplaySummary(summary) {
     ["タグ", String(s.tag_id)],
     ["boot_id", hex(s.boot_id, 8)],
     ["FW", s.fw_version ?? "--"],
-    ["座標表", configLabel(s.config_rev, summary.anchors_rev), s.config_rev !== null && s.config_rev !== summary.anchors_rev],
+    ["座標表", configLabel(s.config_rev, summary.anchors_rev, summary.anchors), s.config_rev !== null && s.config_rev !== summary.anchors_rev],
     ["開始", s.started_at.replace("T", " ").slice(0, 19)],
     ["サイクル数", String(s.cycles)],
     ["測位成功率", pct(s.fix_rate)],
