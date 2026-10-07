@@ -270,7 +270,9 @@ def test_summary(client: TestClient, populated: int) -> None:
     assert by_id["0x0100"]["distance_mean"] == pytest.approx((10 * 1.0 + 2 * 2.0) / 12)
     # hello が無いセッションは現在の構成の座標表を返す
     assert payload["anchors_rev"] == 2
-    assert payload["anchors"] == [{"id": "0x0100", "label": "北西", "x": 0.0, "y": 0.0, "z": 1.8}]
+    assert payload["anchors"] == [
+        {"id": "0x0100", "label": "北西", "x": 0.0, "y": 0.0, "z": 1.8, "source": "manual"}
+    ]
 
 
 def test_summary_uses_session_config_revision(client: TestClient, populated: int) -> None:
@@ -280,6 +282,26 @@ def test_summary_uses_session_config_revision(client: TestClient, populated: int
     payload = client.get(f"/api/v1/sessions/{populated}/summary").json()
     assert payload["anchors_rev"] == 2
     assert payload["anchors"][0]["x"] == 0.0
+
+
+def test_summary_reports_anchor_source_of_session_revision(client: TestClient, populated: int) -> None:
+    # self-survey の座標表で走ったセッションは、後で手測りに戻しても survey の座標として返す
+    bulk = {
+        "source": "survey",
+        "anchors": [
+            {"id": "0x0100", "x": 0.0, "y": 0.0, "z": 0.25},
+            {"id": "0x0101", "x": 2.3, "y": 0.0, "z": 0.25},
+        ],
+    }
+    rev = client.post("/api/v1/anchors:bulk", json=bulk).json()["rev"]
+    client.post("/api/v1/hello", json={"tag_id": 1, "boot_id": 0xAAAAAAAA, "config_rev": rev})
+    client.put("/api/v1/anchors/0x0100", json={"x": 0, "y": 0, "z": 0.25})
+
+    payload = client.get(f"/api/v1/sessions/{populated}/summary").json()
+    assert payload["anchors_rev"] == rev
+    assert [a["source"] for a in payload["anchors"]] == ["survey", "survey"]
+    current = client.get("/api/v1/anchors").json()["anchors"]
+    assert {a["id"]: a["source"] for a in current} == {"0x0100": "manual", "0x0101": "survey"}
 
 
 def test_summary_unknown_session(client: TestClient) -> None:

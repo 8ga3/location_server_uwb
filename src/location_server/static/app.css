@@ -161,6 +161,16 @@ td.worse { color: var(--bad); font-weight: 600; }
 .lamp.bad { background: var(--bad); }
 .swatch { display: inline-block; width: 10px; height: 3px; margin-right: 6px; vertical-align: 3px; }
 .check .swatch { margin-right: 0; }
+/* self-survey で推定したアンカー座標の印。XY 平面の破線の外枠と対応させ、枠線だけで描く */
+.tag {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 4px;
+  border: 1px dashed var(--fg-muted);
+  border-radius: 3px;
+  color: var(--fg-muted);
+  font-size: 11px;
+}
 .swatch.trail-ls { background: linear-gradient(to right, hsl(220, 75%, 50%), hsl(0, 75%, 50%)); }
 .swatch.trail-filter { background: var(--filter); }
 .panel-head .checks { display: inline-flex; flex-wrap: wrap; gap: 4px 12px; }

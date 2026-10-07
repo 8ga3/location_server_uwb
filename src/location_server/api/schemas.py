@@ -312,13 +312,18 @@ class SessionListOut(BaseModel):
 
 
 class LiveAnchorOut(BaseModel):
-    """可視化ページへ渡すアンカー。XY 平面へ描くので呼び名も添える。"""
+    """可視化ページへ渡すアンカー。XY 平面へ描くので呼び名も添える。
+
+    `source` は座標の出どころ (`manual` = 手測り、`survey` = self-survey の推定値)。
+    画面で手測りの座標と見分けられるようにするために渡す。
+    """
 
     id: str
     label: str | None
     x: float
     y: float
     z: float
+    source: str
 
 
 class AnchorSummaryOut(BaseModel):
@@ -370,6 +375,7 @@ def to_live_anchor_out(anchor: Anchor) -> LiveAnchorOut:
         x=mm_to_meters(anchor.x_mm),
         y=mm_to_meters(anchor.y_mm),
         z=mm_to_meters(anchor.z_mm),
+        source=anchor.source,
     )
 
 
