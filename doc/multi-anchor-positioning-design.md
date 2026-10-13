@@ -651,7 +651,8 @@ sequenceDiagram
 
 #### フェーズ 2: 距離行列の集約
 
-コーディネータのシリアル出力をそのまま PC に保存する (`pio device monitor | tee survey.log`)。
+コーディネータのシリアル出力をそのまま PC に保存する (`pio device monitor -f default -f log2file`)。
+`pio device monitor` は標準出力が端末でないと起動しないので、`| tee` でファイルに残すことはできない。
 組ごとに次の行が出る。`median_mm` は目視の確認用で、PC 側は `mm` の個々の値から計算し直す。
 
 ```text
