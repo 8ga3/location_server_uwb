@@ -13,7 +13,8 @@
 
 使用例:
 
-    pio device monitor -f default -f log2file   # ファーム側。コーディネータで `survey 256 257 258 259`
+    # ファーム側。コーディネータのモニタで `survey 257 258 259` と打つ
+    pio device monitor --echo -f send_on_enter -f default -f log2file
     python tools/survey_solve.py logs/device-monitor-*.log --reference rooms/room-1.json --out survey.json
     python tools/anchor_cli.py apply survey.json --dry-run
 """
