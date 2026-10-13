@@ -13,8 +13,8 @@
 
 使用例:
 
-    pio device monitor | tee survey.log      # ファーム側。コーディネータで `survey 256 257 258 259`
-    python tools/survey_solve.py survey.log --reference rooms/room-1.json --out survey.json
+    pio device monitor -f default -f log2file   # ファーム側。コーディネータで `survey 256 257 258 259`
+    python tools/survey_solve.py logs/device-monitor-*.log --reference rooms/room-1.json --out survey.json
     python tools/anchor_cli.py apply survey.json --dry-run
 """
 
