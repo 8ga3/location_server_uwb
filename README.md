@@ -1,5 +1,15 @@
 # location_server_uwb
 
+## リポジトリの統合先
+
+このリポジトリは [8ga3/uwb-trilattice](https://github.com/8ga3/uwb-trilattice) に統合した。
+今後の開発と Issue・PR の受付は統合先で行う。
+サーバーの最新の実装と利用手順は
+[server/](https://github.com/8ga3/uwb-trilattice/tree/main/server) を参照。
+以下は統合前の記録であり、このリポジトリでは更新しない。
+
+## 統合前の概要
+
 UWB 測位のデバッグ・精度評価に使うサーバーである。アンカーの ID と設置座標を保持してタグへ配信し、
 タグから送られてくる測距結果と自己位置推定結果を蓄積して可視化する。
 
