@@ -402,7 +402,7 @@ def _flippable_groups(
     return groups
 
 
-def _critical_edges(ids: list[int], edges: list[Edge]) -> list[tuple[int, int]]:
+def _critical_edges(ids: list[int], edges: list[Edge], *, with_bias: bool = False) -> list[tuple[int, int]]:
     """1 本でも欠けると形が崩れる測距の組を返す (アンカーが 4 台以上のとき)。
 
     2 次元で測距から形が一意に決まる (大域剛性) には、測距のつながりが 3 連結で、かつどの 1 本を
@@ -413,6 +413,11 @@ def _critical_edges(ids: list[int], edges: list[Edge]) -> list[tuple[int, int]]:
     測距の組が欠けて形が崩れるかは配置によらない性質 (一般の位置では) なので、乱数で置いた座標で
     剛性行列 R を作って調べる。組 k を外しても階数が落ちないのは、R の行の一次従属 (自己応力) に
     組 k が加わる場合だけなので、Rᵀ の簡約行階段形から 1 回で求まる。
+
+    with_bias なら、全ての測距に同じだけ効く共通バイアス b も未知数として、R に全て 1 の列を加えて
+    調べる。b を推定すると未知数が 1 つ増えるので、距離が確定していれば一意な形でも、b の値ごと違う別の
+    形が同じ残差で成り立つことがある (例えば中心と外周 4 台を 8 本でつないだ 5 台)。アンカーが 4 台で
+    全ての組を測った場合も、冗長度が 0 なので全ての組が挙がる。
     """
     n = len(ids)
     if n < 4:
@@ -420,9 +425,12 @@ def _critical_edges(ids: list[int], edges: list[Edge]) -> list[tuple[int, int]]:
     rng = random.Random(0)
     position = {anchor_id: (rng.random(), rng.random()) for anchor_id in ids}
     column = {anchor_id: 2 * k for k, anchor_id in enumerate(ids)}
-    # Rᵀ: 行が座標 (2n)、列が測距の組
+    # Rᵀ: 行が座標 (2n) と、b を推定するならバイアス (1)、列が測距の組
     m = len(edges)
-    rt = [[0.0] * m for _ in range(2 * n)]
+    rows = 2 * n + (1 if with_bias else 0)
+    rt = [[0.0] * m for _ in range(rows)]
+    if with_bias:
+        rt[2 * n] = [1.0] * m
     for k, e in enumerate(edges):
         dx = position[e.a][0] - position[e.b][0]
         dy = position[e.a][1] - position[e.b][1]
@@ -431,21 +439,21 @@ def _critical_edges(ids: list[int], edges: list[Edge]) -> list[tuple[int, int]]:
     pivots: list[tuple[int, int]] = []  # (行, 列)
     row = 0
     for col in range(m):
-        best = max(range(row, 2 * n), key=lambda r: abs(rt[r][col]), default=None)
+        best = max(range(row, rows), key=lambda r: abs(rt[r][col]), default=None)
         if best is None or abs(rt[best][col]) < 1e-9:
             continue
         rt[row], rt[best] = rt[best], rt[row]
         pivot = rt[row][col]
         rt[row] = [value / pivot for value in rt[row]]
-        for other in range(2 * n):
+        for other in range(rows):
             if other != row and rt[other][col] != 0.0:
                 factor = rt[other][col]
                 rt[other] = [a - factor * b for a, b in zip(rt[other], rt[row], strict=True)]
         pivots.append((row, col))
         row += 1
-        if row == 2 * n:
+        if row == rows:
             break
-    if len(pivots) < 2 * n - 3:
+    if len(pivots) < 2 * n - 3 + (1 if with_bias else 0):
         # そもそも形が決まらない。solve() のランクの検査で断るので、ここでは挙げない
         return []
     free = [col for col in range(m) if col not in {c for _, c in pivots}]
@@ -484,9 +492,8 @@ def solve(
             f"測距が 1 本以下のアンカーがあり、位置が決まりません: {names}。"
             "そのアンカーとの測距を取り直すか、--exclude を見直してください"
         )
-    critical = _critical_edges(ids, edges)
-
     estimate_bias = fixed_bias_m is None
+    critical = _critical_edges(ids, edges, with_bias=estimate_bias)
     # 未知数: 1 番の x、2 番以降の (x, y)、(推定するなら) b
     unknowns = 1 + 2 * (n - 2) + (1 if estimate_bias else 0)
     redundancy = len(edges) - unknowns
@@ -785,6 +792,11 @@ def format_report(
             f"  次の組の測距は 1 本でも欠けると形が崩れ、同じ測距を満たす別の形がありえます: {names}。"
             "測距の組を足すか、形が正しいか目で確かめてください"
         )
+        if solution.bias_estimated:
+            lines.append(
+                "  バイアス b も推定しているので、b の値ごと違う形がありえます。"
+                "b を手測りとの比較などで決めて --fixed-bias-mm で固定すると、一意に決まることがあります"
+            )
     for separator, group in solution.flippable:
         names = ", ".join(_hex(anchor_id) for anchor_id in group)
         line = " と ".join(_hex(anchor_id) for anchor_id in separator)
@@ -944,7 +956,8 @@ def run(args: argparse.Namespace) -> list[str]:
     if (solution.flippable or solution.critical_edges) and not args.accept_nonunique:
         problems.append(
             "測距の組み合わせでは配置が一意に決まりません (上の表示を参照)。--mirror では決まらないので、"
-            "測距の組を足すか、置かれた形を目で確かめてから --accept-nonunique を付けてください"
+            "測距の組を足すか、バイアスを --fixed-bias-mm で固定するか、置かれた形を目で確かめてから"
+            " --accept-nonunique を付けてください"
         )
     if problems:
         report.append("")
