@@ -215,3 +215,105 @@ def test_cli_reports_missing_log_lines(tmp_path: Path, capsys: pytest.CaptureFix
 
     assert survey_solve.main([str(log)]) == 1
     assert "SURVEY_PAIR 行が見つかりません" in capsys.readouterr().err
+
+
+def _skip_both(pairs: list[tuple[int, int]]) -> set[tuple[int, int]]:
+    return {p for a, b in pairs for p in ((a, b), (b, a))}
+
+
+def test_anchor_with_single_edge_is_rejected() -> None:
+    # 5 台の間の全 10 組と、6 台目への 1 組だけ。観測数の勘定は足りるが、6 台目の位置は円周上にしか決まらない
+    layout = {**LAYOUT, 0x0105: (2.6, 2.4, 0.3)}
+    skip = _skip_both([(anchor_id, 0x0105) for anchor_id in LAYOUT if anchor_id != 0x0100])
+    with pytest.raises(survey_solve.SurveyError, match="0x0105"):
+        _solve(layout, _log(layout, skip=skip))
+
+
+def test_flexible_layout_is_rejected() -> None:
+    # 4 台ずつの 2 つの塊を 2 本の測距だけでつなぐ。どのアンカーも測距は 3 本以上あり、観測数も足りるが、
+    # 2 つの塊の相対的な向きが 1 自由度だけ決まらない
+    layout = {
+        0x0100: (0.0, 0.0, 0.25),
+        0x0101: (1.5, 0.0, 0.25),
+        0x0102: (1.6, 1.4, 0.25),
+        0x0103: (0.1, 1.5, 0.25),
+        0x0104: (3.5, 0.2, 0.25),
+        0x0105: (5.0, 0.1, 0.25),
+        0x0106: (5.1, 1.6, 0.25),
+        0x0107: (3.4, 1.7, 0.25),
+    }
+    left, right = [0x0100, 0x0101, 0x0102, 0x0103], [0x0104, 0x0105, 0x0106, 0x0107]
+    bridges = {frozenset((0x0101, 0x0104)), frozenset((0x0102, 0x0107))}
+    skip = _skip_both([(a, b) for a in left for b in right if frozenset((a, b)) not in bridges])
+    with pytest.raises(survey_solve.SurveyError, match="一意に決まりません"):
+        _solve(layout, _log(layout, skip=skip), fixed_bias_m=0.0)
+
+
+def test_anchor_with_two_edges_is_reported() -> None:
+    skip = _skip_both([(0x0104, 0x0102), (0x0104, 0x0103)])
+    solution = _solve(LAYOUT, _log(LAYOUT, skip=skip), fixed_bias_m=0.0)
+
+    assert solution.two_edge_ids == [0x0104]
+    report = survey_solve.format_report([], [], solution, None, {})
+    assert any("0x0104 は測距が 2 本だけ" in line for line in report)
+
+
+@pytest.mark.parametrize(
+    "reference_ids",
+    [
+        [0x0100, 0x0101],  # 共通のアンカーが 2 台
+        [0x0100, 0x0101, 0x0104],  # 3 台あるが手測りの座標で一直線に並ぶ
+    ],
+)
+def test_alignment_is_ambiguous_without_three_non_collinear_anchors(reference_ids: list[int]) -> None:
+    layout = {**LAYOUT, 0x0104: (4.0, 0.0, 0.25)}
+    solution = _solve(layout, _log(layout))
+    reference = {anchor_id: layout[anchor_id][:2] for anchor_id in reference_ids}
+
+    alignment = survey_solve.align(solution, reference)
+    assert alignment is not None
+    assert alignment.ambiguous
+    report = survey_solve.format_report([], [], solution, alignment, {})
+    assert any("--mirror" in line for line in report)
+    with pytest.raises(survey_solve.SurveyError, match="--mirror"):
+        survey_solve.build_document(solution, alignment, {}, None)
+
+    # 向きを指定すれば書き出せる
+    forced = survey_solve.align(solution, reference, mirror=False)
+    assert forced is not None
+    assert not forced.ambiguous
+    assert not forced.mirrored
+    assert forced.alternative_rms_m is None
+    document = survey_solve.build_document(solution, forced, {}, None)
+    by_id = {a["id"]: a for a in document["anchors"]}
+    assert by_id["0x0102"]["y"] == pytest.approx(layout[0x0102][1], abs=1e-3)
+
+
+def test_cli_refuses_ambiguous_mirror_and_accepts_explicit_choice(tmp_path: Path) -> None:
+    log = tmp_path / "survey.log"
+    log.write_text("\n".join(_log(LAYOUT)) + "\n", encoding="utf-8")
+    reference = tmp_path / "room.json"
+    reference.write_text(
+        json.dumps(
+            {
+                "anchors": [
+                    {
+                        "id": f"0x{anchor_id:04X}",
+                        "x": LAYOUT[anchor_id][0],
+                        "y": LAYOUT[anchor_id][1],
+                        "z": 0.25,
+                    }
+                    for anchor_id in (0x0100, 0x0101)
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    out = tmp_path / "survey.json"
+
+    assert survey_solve.main([str(log), "--reference", str(reference), "--out", str(out)]) == 1
+    assert not out.exists()
+    assert (
+        survey_solve.main([str(log), "--reference", str(reference), "--out", str(out), "--mirror", "no"]) == 0
+    )
+    assert out.exists()

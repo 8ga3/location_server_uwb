@@ -42,6 +42,11 @@ _EXCLUDE_PATTERN = re.compile(r"(?P<a>[0-9a-fA-Fx]+)-(?P<b>[0-9a-fA-Fx]+)")
 # 最小二乗の反復の打ち切り
 _MAX_ITERATIONS = 200
 _STEP_TOLERANCE_M = 1e-9
+# 解での JᵀJ の最小固有値が最大固有値のこの割合以下なら、未知数のどれかが観測で決まっていないと見なす
+_RANK_TOLERANCE = 1e-9
+# 手測りの座標で、共通のアンカーの短軸方向の広がりが長軸方向のこの割合未満なら一直線に並ぶと見なし、
+# 鏡映の有無を判定しない
+_COLLINEAR_RATIO = 0.05
 
 
 class SurveyError(ValueError):
@@ -86,6 +91,9 @@ class Solution:
     redundancy: int
     iterations: int
     mds_eigenvalues: list[float]
+    # 測距が 2 本だけのアンカー。その 2 台を結ぶ直線について反対側にも同じ残差の解があり、
+    # どちらに置かれたかは MDS の初期解で決まる
+    two_edge_ids: list[int] = field(default_factory=list)
     rms_m: float = field(init=False)
 
     def __post_init__(self) -> None:
@@ -101,6 +109,10 @@ class Alignment:
     mirrored: bool
     errors_m: list[float]
     rms_m: float
+    # 共通のアンカーが 3 台未満か一直線に並ぶため、鏡映の有無を手測りとの差で判定できなかった
+    ambiguous: bool = False
+    # 選ばなかった側 (鏡映の有無を逆にした場合) の差の RMS。--mirror で向きを指定したときは None
+    alternative_rms_m: float | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -281,6 +293,21 @@ def solve(
     index = {anchor_id: i for i, anchor_id in enumerate(ids)}
     z = [z_by_id.get(anchor_id, 0.0) for anchor_id in ids]
 
+    # 測距が 1 本以下のアンカーは、位置が円周上 (または全く) 決まらない。観測数の勘定が足りていても
+    # 任意の座標を書き出してしまうので、先に断る
+    degree = {anchor_id: 0 for anchor_id in ids}
+    for e in edges:
+        degree[e.a] += 1
+        degree[e.b] += 1
+    loose = [anchor_id for anchor_id in ids if degree[anchor_id] < 2]
+    if loose:
+        names = ", ".join(f"0x{anchor_id:04X}" for anchor_id in loose)
+        raise SurveyError(
+            f"測距が 1 本以下のアンカーがあり、位置が決まりません: {names}。"
+            "そのアンカーとの測距を取り直すか、--exclude を見直してください"
+        )
+    two_edge_ids = [anchor_id for anchor_id in ids if degree[anchor_id] == 2] if n > 3 else []
+
     estimate_bias = fixed_bias_m is None
     # 未知数: 1 番の x、2 番以降の (x, y)、(推定するなら) b
     unknowns = 1 + 2 * (n - 2) + (1 if estimate_bias else 0)
@@ -371,24 +398,58 @@ def solve(
         if not improved or max(abs(s) for s in step) < _STEP_TOLERANCE_M:
             break
 
+    # 観測数が足りていても、2 つの塊が 2 本の測距だけでつながっている場合などは、解の近くで
+    # 座標を動かしても残差が変わらない方向が残る。解での JᵀJ が特異に近ければ断る
+    jtj = [[sum(row[a] * row[b] for row in jacobian) for b in range(unknowns)] for a in range(unknowns)]
+    jtj_eigen, _ = _jacobi_eigen(jtj)
+    if jtj_eigen[-1] <= jtj_eigen[0] * _RANK_TOLERANCE:
+        raise SurveyError(
+            "測距の組み合わせでは座標が一意に決まりません (残差を変えずに動かせる向きがあります)。"
+            "欠けている組を取り直すか、--exclude を見直してください"
+        )
+
     points, bias = unpack(theta)
     # 最小二乗の途中で鏡映が入れ替わることはないが、2 番の y の符号だけは揃え直す
     points = _gauge_fix(points)
     by_edge = {(e.a, e.b): r for e, r in zip(edges, residuals, strict=True)}
-    return Solution(ids, points, z, bias, estimate_bias, by_edge, redundancy, iterations, eigenvalues)
+    return Solution(
+        ids, points, z, bias, estimate_bias, by_edge, redundancy, iterations, eigenvalues, two_edge_ids
+    )
 
 
-def align(solution: Solution, reference_xy: dict[int, tuple[float, float]]) -> Alignment | None:
+def _is_collinear(points: list[tuple[float, float]]) -> bool:
+    """点の並びの短軸方向の広がりが、長軸方向に比べて十分小さいか。2 点以下なら常に真。"""
+    if len(points) < 3:
+        return True
+    mx = sum(x for x, _ in points) / len(points)
+    my = sum(y for _, y in points) / len(points)
+    sxx = sum((x - mx) ** 2 for x, _ in points)
+    syy = sum((y - my) ** 2 for _, y in points)
+    sxy = sum((x - mx) * (y - my) for x, y in points)
+    # 2x2 の共分散行列の固有値
+    half_trace = (sxx + syy) / 2
+    root = math.sqrt(max(half_trace**2 - (sxx * syy - sxy * sxy), 0.0))
+    major, minor = half_trace + root, max(half_trace - root, 0.0)
+    return major == 0 or math.sqrt(minor / major) < _COLLINEAR_RATIO
+
+
+def align(
+    solution: Solution, reference_xy: dict[int, tuple[float, float]], *, mirror: bool | None = None
+) -> Alignment | None:
     """推定した座標を、手測りの座標へ回転・平行移動 (必要なら鏡映) で重ねる。
 
     スケールは変えない。スケールのずれはバイアスの推定の誤りを表すので、重ね合わせで隠さない。
     共通のアンカーが 2 台未満なら None を返す。
+
+    鏡映の有無は、`mirror` を渡せばその向きにし、渡さなければ手測りとの差の小さい方を選ぶ。
+    ただし共通のアンカーが 3 台未満か、手測りの座標で一直線に並ぶときは、どちらの向きでも差が
+    同じになり判定できないので、`ambiguous` を立てる。
     """
     common = [i for i, anchor_id in enumerate(solution.ids) if anchor_id in reference_xy]
     if len(common) < 2:
         return None
-    best: Alignment | None = None
-    for mirrored in (False, True):
+    candidates: list[Alignment] = []
+    for mirrored in (False, True) if mirror is None else (mirror,):
         src = [(x, -y if mirrored else y) for x, y in solution.xy]
         dst = {i: reference_xy[solution.ids[i]] for i in common}
         sx = sum(src[i][0] for i in common) / len(common)
@@ -403,9 +464,13 @@ def align(solution: Solution, reference_xy: dict[int, tuple[float, float]]) -> A
         moved = [(c * (x - sx) - s * (y - sy) + dx, s * (x - sx) + c * (y - sy) + dy) for x, y in src]
         errors = [math.dist(moved[i], dst[i]) for i in common]
         rms = math.sqrt(sum(e * e for e in errors) / len(errors))
-        if best is None or rms < best.rms_m:
-            full_errors = [math.dist(moved[i], dst[i]) if i in dst else math.nan for i in range(len(moved))]
-            best = Alignment(moved, mirrored, full_errors, rms)
+        full_errors = [math.dist(moved[i], dst[i]) if i in dst else math.nan for i in range(len(moved))]
+        candidates.append(Alignment(moved, mirrored, full_errors, rms))
+    if mirror is not None:
+        return candidates[0]
+    best, other = sorted(candidates, key=lambda a: a.rms_m)
+    best.alternative_rms_m = other.rms_m
+    best.ambiguous = _is_collinear([reference_xy[solution.ids[i]] for i in common])
     return best
 
 
@@ -455,6 +520,11 @@ def format_report(
             "  冗長度が 0 なので残差は常に 0 になり、測距の誤りを残差から見つけられません。"
             "手測りの座標と突き合わせてください"
         )
+    for anchor_id in solution.two_edge_ids:
+        lines.append(
+            f"  {_hex(anchor_id)} は測距が 2 本だけです。相手の 2 台を結ぶ直線の反対側にも同じ残差の"
+            "位置があるので、置かれた側が正しいか確かめてください"
+        )
 
     lines.append("")
     lines.append(
@@ -488,6 +558,15 @@ def format_report(
     else:
         mirror = "鏡映あり" if alignment.mirrored else "鏡映なし"
         lines.append(f"座標 (m)。手測りの座標系へ回転・平行移動で重ねた ({mirror})")
+        if alignment.ambiguous:
+            lines.append(
+                "  手測りの座標表と共通のアンカーが 3 台未満か一直線に並ぶので、鏡映の有無を判定できません。"
+                "向きを目で確かめ、--mirror yes / no で指定してください"
+            )
+        elif alignment.alternative_rms_m is not None:
+            lines.append(
+                f"  鏡映を逆にした場合の手測りとの差の RMS: {alignment.alternative_rms_m * 1000:.1f} mm"
+            )
         coords = alignment.xy
     lines.append(f"{'ID':<8}{'x':>9}{'y':>9}{'z':>8}" + _right("手測りとの差 (mm)", 20))
     for i, anchor_id in enumerate(solution.ids):
@@ -506,6 +585,11 @@ def build_document(
     note: str | None,
 ) -> dict[str, Any]:
     """`anchor_cli.py apply` と `POST /api/v1/anchors:bulk` に渡せる座標表を作る。"""
+    if alignment is not None and alignment.ambiguous:
+        raise SurveyError(
+            "鏡映の有無を判定できないので座標表を書き出しません。向きを目で確かめ、--mirror yes / no で"
+            "指定してください"
+        )
     coords = alignment.xy if alignment is not None else solution.xy
     anchors: list[dict[str, Any]] = []
     for i, anchor_id in enumerate(solution.ids):
@@ -567,7 +651,8 @@ def run(args: argparse.Namespace) -> list[str]:
     fixed_bias = None if args.fixed_bias_mm is None else args.fixed_bias_mm / 1000
     solution = solve(edges, z_by_id, fixed_bias_m=fixed_bias)
     reference_xy = {anchor_id: (a["x"], a["y"]) for anchor_id, a in reference.items()}
-    alignment = align(solution, reference_xy) if reference else None
+    mirror = {"auto": None, "yes": True, "no": False}[args.mirror]
+    alignment = align(solution, reference_xy, mirror=mirror) if reference else None
 
     report = format_report(pairs, edges, solution, alignment, reference)
     if args.out:
@@ -600,6 +685,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         metavar="ID-ID",
         help="計算から外す組 (例: 0x0100-0x0102)。繰り返し指定できる。残差の大きい組を外すのに使う",
+    )
+    parser.add_argument(
+        "--mirror",
+        choices=("auto", "yes", "no"),
+        default="auto",
+        help="手測りの座標系へ重ねるときの鏡映。auto は手測りとの差で決める。共通のアンカーが 3 台未満か"
+        "一直線に並ぶときは判定できないので、yes / no で指定する",
     )
     parser.add_argument("--out", help="推定した座標表を書き出すファイル (source: survey)")
     parser.add_argument("--note", help="座標表の note")
