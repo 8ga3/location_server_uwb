@@ -513,10 +513,48 @@ def test_critical_edges_are_detected_for_prism_layout() -> None:
 
 
 def test_full_survey_has_no_critical_edges() -> None:
-    for layout in (LAYOUT, {k: v for k, v in LAYOUT.items() if k != 0x0104}):
-        solution = _solve(layout, _log(layout))
-        assert solution.critical_edges == []
-        assert solution.flippable == []
+    # 5 台の全組なら、バイアスを推定しても冗長度が残り、どの組を外しても形とバイアスが決まる
+    solution = _solve(LAYOUT, _log(LAYOUT))
+    assert solution.critical_edges == []
+    assert solution.flippable == []
+
+
+def test_four_anchors_need_fixed_bias_or_confirmation(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # 4 台の全組でバイアスを推定すると冗長度 0 なので、全ての組が「欠けると決まらない」組になる。
+    # バイアスを固定すれば冗長度が 1 残り、どの組を外しても形が決まる
+    layout = {k: v for k, v in LAYOUT.items() if k != 0x0104}
+    lines = _log(layout, bias_m=0.03)
+    assert len(_solve(layout, lines).critical_edges) == 6
+    assert _solve(layout, lines, fixed_bias_m=0.03).critical_edges == []
+
+    log = tmp_path / "survey.log"
+    log.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    out = tmp_path / "survey.json"
+    assert survey_solve.main([str(log), "--out", str(out)]) == 1
+    assert "--fixed-bias-mm" in capsys.readouterr().err
+    assert survey_solve.main([str(log), "--out", str(out), "--fixed-bias-mm", "30"]) == 0
+    assert survey_solve.main([str(log), "--out", str(out), "--accept-nonunique"]) == 0
+
+
+def test_bias_makes_wheel_layout_nonunique() -> None:
+    # 中心と外周 4 台を、中心からの 4 本と外周の 4 本でつなぐ (車輪)。距離が確定していれば形は一意だが、
+    # バイアスも推定すると未知数が測距と同じ数になり、b の値ごと違う形がありうる
+    layout = {
+        0x0100: (0.0, 0.0, 0.25),
+        0x0101: (1.5, 0.2, 0.25),
+        0x0102: (0.1, 1.4, 0.25),
+        0x0103: (-1.6, -0.1, 0.25),
+        0x0104: (0.2, -1.3, 0.25),
+    }
+    rim = [(0x0101, 0x0102), (0x0102, 0x0103), (0x0103, 0x0104), (0x0104, 0x0101)]
+    kept = {frozenset((0x0100, k)) for k in (0x0101, 0x0102, 0x0103, 0x0104)} | {frozenset(r) for r in rim}
+    skip = _skip_both([(a, b) for a, b in itertools.combinations(layout, 2) if frozenset((a, b)) not in kept])
+    lines = _log(layout, skip=skip)
+
+    assert {frozenset(e) for e in _solve(layout, lines).critical_edges} == kept
+    assert _solve(layout, lines, fixed_bias_m=0.0).critical_edges == []
 
 
 def test_cli_refuses_critical_edges_without_confirmation(
