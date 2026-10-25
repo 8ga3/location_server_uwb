@@ -603,3 +603,18 @@ def test_alignment_is_ambiguous_when_estimate_is_collinear() -> None:
     assert alignment is not None
     assert alignment.ambiguous
     assert alignment.alternative_rms_m == pytest.approx(alignment.rms_m, abs=1e-3)
+
+
+def test_alignment_needs_horizontally_separated_estimate() -> None:
+    # 手測りでは離れていても、推定した座標で共通のアンカーが重なっていれば回転は決まらない
+    layout = {
+        0x0100: (0.0, 0.0, 0.0),
+        0x0101: (0.0, 0.0, 2.4),
+        0x0102: (0.44, 0.0, 0.0),
+        0x0103: (0.0, 1.17, 0.0),
+    }
+    solution = _solve(layout, _log(layout))
+    reference = {0x0100: (10.0, 20.0), 0x0101: (10.2, 20.0)}
+
+    assert survey_solve.align(solution, reference) is None
+    assert survey_solve.align(solution, reference, mirror=False) is None
