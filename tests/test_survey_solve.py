@@ -96,10 +96,6 @@ def test_recovers_layout_and_bias_without_noise() -> None:
     assert solution.gauge_ids == (0x0100, 0x0101, 0x0102)
     for anchor_id, (x, y) in zip(solution.ids, solution.xy, strict=True):
         assert (x, y) == pytest.approx(LAYOUT[anchor_id][:2], abs=1e-3)
-    xy = dict(zip(solution.ids, solution.xy, strict=True))
-    assert xy[g0] == pytest.approx((0.0, 0.0), abs=1e-3)
-    assert xy[g1][1] == pytest.approx(0.0, abs=1e-3)
-    assert xy[g1][0] > 0
 
 
 def test_noise_stays_small_and_alignment_matches_reference() -> None:
