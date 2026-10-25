@@ -683,9 +683,10 @@ def align(
     """推定した座標を、手測りの座標へ回転・平行移動 (必要なら鏡映) で重ねる。
 
     スケールは変えない。スケールのずれはバイアスの推定の誤りを表すので、重ね合わせで隠さない。
-    手測りの水平位置が _MIN_REFERENCE_SPAN_M 以上離れた共通のアンカーの組が無い (共通のアンカーが
-    2 台未満か、真上と真下のように重なる) ときは、回転を決められないので None を返す。鏡映の指定では
-    この曖昧さは解けない。
+    水平位置が _MIN_REFERENCE_SPAN_M 以上離れた共通のアンカーの組が、手測りの座標と推定した座標の
+    両方に無い (共通のアンカーが 2 台未満か、真上と真下のように重なる) ときは、回転を決められないので
+    None を返す。片方だけ離れていても、もう片方が重なっていれば回転は決まらない。鏡映の指定ではこの
+    曖昧さは解けない。
 
     鏡映の有無は、`mirror` を渡せばその向きにし、渡さなければ手測りとの差の小さい方を選ぶ。
     ただし次の場合は判定できないので、`ambiguous` を立てる。
@@ -694,11 +695,13 @@ def align(
     - 逆の向きとの差の RMS が _MIRROR_MARGIN_M 以上離れていない
     """
     common = [i for i, anchor_id in enumerate(solution.ids) if anchor_id in reference_xy]
-    spans = [
-        math.dist(reference_xy[solution.ids[a]], reference_xy[solution.ids[b]])
-        for a, b in itertools.combinations(common, 2)
-    ]
-    if not spans or max(spans) < _MIN_REFERENCE_SPAN_M:
+    pairs = list(itertools.combinations(common, 2))
+    reference_span = max(
+        (math.dist(reference_xy[solution.ids[a]], reference_xy[solution.ids[b]]) for a, b in pairs),
+        default=0.0,
+    )
+    estimate_span = max((math.dist(solution.xy[a], solution.xy[b]) for a, b in pairs), default=0.0)
+    if min(reference_span, estimate_span) < _MIN_REFERENCE_SPAN_M:
         return None
     candidates: list[Alignment] = []
     for mirrored in (False, True) if mirror is None else (mirror,):
