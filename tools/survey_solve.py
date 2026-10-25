@@ -47,6 +47,8 @@ _RANK_TOLERANCE = 1e-9
 # 手測りの座標で、共通のアンカーの短軸方向の広がりが長軸方向のこの割合未満なら一直線に並ぶと見なし、
 # 鏡映の有無を判定しない
 _COLLINEAR_RATIO = 0.05
+# ゲージの基準を ID 順に選ぶとき、最も離れた候補に対してこの割合未満しか離れていないアンカーは飛ばす
+_GAUGE_MIN_RATIO = 0.3
 
 
 class SurveyError(ValueError):
@@ -89,7 +91,8 @@ class Edge:
 @dataclass
 class Solution:
     ids: list[int]
-    # 推定した水平位置。ゲージは ids[0] を原点、ids[1] を +X 軸上、ids[2] を y > 0 に固定する
+    # 推定した水平位置 (ids と同じ並び)。ゲージは gauge_ids の 1 台目を原点、2 台目を +X 軸上、
+    # 3 台目を y > 0 に固定する
     xy: list[tuple[float, float]]
     z: list[float]
     bias_m: float
@@ -101,6 +104,8 @@ class Solution:
     # 測距が 2 本だけのアンカー。その 2 台を結ぶ直線について反対側にも同じ残差の解があり、
     # どちらに置かれたかは MDS の初期解で決まる
     two_edge_ids: list[int] = field(default_factory=list)
+    # ゲージの基準にしたアンカー (原点、+X 軸上、y > 0)。_choose_gauge() を参照
+    gauge_ids: tuple[int, int, int] = (0, 0, 0)
     rms_m: float = field(init=False)
 
     def __post_init__(self) -> None:
@@ -260,8 +265,36 @@ def _solve_linear(matrix: list[list[float]], rhs: list[float]) -> list[float]:
 # 推定
 
 
+def _choose_gauge(xy: list[tuple[float, float]]) -> tuple[int, int, int]:
+    """ゲージの基準にする 3 台を MDS の初期解から選ぶ。
+
+    原点は 0 番 (ID が最小のアンカー) とする。+X 軸上に置くアンカーと y > 0 に置くアンカーは、
+    これまでどおり ID 順に 1 番、2 番を使い、部屋の座標の取り方 (0 番から 1 番の向きを X 軸にする) と
+    揃える。ただし真上と真下のように水平位置がほぼ同じ 2 台を選ぶと回転が決まらず、位置を決められる
+    データでもランクの検査で断ってしまう。そこで、候補のうち最も離れたものに対して離れ方が
+    _GAUGE_MIN_RATIO 未満のアンカーは飛ばし、ID 順で次のアンカーを使う。+X 軸上の基準は原点からの
+    水平距離、y > 0 の基準は原点と +X 軸上の基準を結ぶ直線からの距離で比べる。
+    """
+    n = len(xy)
+    g0 = 0
+
+    def pick(candidates: list[int], spread: list[float]) -> int:
+        widest = max(spread)
+        return next(k for k, d in zip(candidates, spread, strict=True) if d >= widest * _GAUGE_MIN_RATIO)
+
+    first = [k for k in range(n) if k != g0]
+    g1 = pick(first, [math.dist(xy[k], xy[g0]) for k in first])
+    ax, ay = xy[g1][0] - xy[g0][0], xy[g1][1] - xy[g0][1]
+    second = [k for k in range(n) if k not in (g0, g1)]
+    g2 = pick(second, [abs(ax * (xy[k][1] - xy[g0][1]) - ay * (xy[k][0] - xy[g0][0])) for k in second])
+    return g0, g1, g2
+
+
 def _gauge_fix(xy: list[tuple[float, float]]) -> list[tuple[float, float]]:
-    """0 番を原点、1 番を +X 軸上、2 番を y > 0 に置く (4.2 のフェーズ 4)。"""
+    """0 番目を原点、1 番目を +X 軸上、2 番目を y > 0 に置く (4.2 のフェーズ 4)。
+
+    並びは solve() の内部の順 (ゲージの基準の 3 台が先頭) を前提とする。
+    """
     x0, y0 = xy[0]
     moved = [(x - x0, y - y0) for x, y in xy]
     angle = math.atan2(moved[1][1], moved[1][0])
@@ -345,7 +378,12 @@ def solve(
 
     initial_bias = 0.0 if fixed_bias_m is None else fixed_bias_m
     mds_xy, eigenvalues = _mds(ids, z, edges, initial_bias)
-    xy = _gauge_fix(mds_xy)
+    # 内部ではゲージの基準の 3 台を先頭に並べ替えて解き、最後に ids の並びへ戻す
+    gauge = _choose_gauge(mds_xy)
+    order = list(gauge) + [k for k in range(n) if k not in gauge]
+    index = {ids[o]: pos for pos, o in enumerate(order)}
+    z_inner = [z[o] for o in order]
+    xy = _gauge_fix([mds_xy[o] for o in order])
 
     def pack(points: list[tuple[float, float]], bias: float) -> list[float]:
         theta = [points[1][0]]
@@ -376,7 +414,7 @@ def solve(
             i, j = index[e.a], index[e.b]
             dx = points[i][0] - points[j][0]
             dy = points[i][1] - points[j][1]
-            dz = z[i] - z[j]
+            dz = z_inner[i] - z_inner[j]
             dist = math.sqrt(dx * dx + dy * dy + dz * dz)
             residuals.append(dist + bias - e.distance_m)
             row = [0.0] * unknowns
@@ -433,12 +471,26 @@ def solve(
             "欠けている組を取り直すか、--exclude を見直してください"
         )
 
-    points, bias = unpack(theta)
-    # 最小二乗の途中で鏡映が入れ替わることはないが、2 番の y の符号だけは揃え直す
-    points = _gauge_fix(points)
+    inner, bias = unpack(theta)
+    # 最小二乗の途中で鏡映が入れ替わることはないが、y > 0 に置くアンカーの符号だけは揃え直す
+    inner = _gauge_fix(inner)
+    points = [(0.0, 0.0)] * n
+    for pos, o in enumerate(order):
+        points[o] = inner[pos]
     by_edge = {(e.a, e.b): r for e, r in zip(edges, residuals, strict=True)}
+    gauge_ids = (ids[gauge[0]], ids[gauge[1]], ids[gauge[2]])
     return Solution(
-        ids, points, z, bias, estimate_bias, by_edge, redundancy, iterations, eigenvalues, two_edge_ids
+        ids,
+        points,
+        z,
+        bias,
+        estimate_bias,
+        by_edge,
+        redundancy,
+        iterations,
+        eigenvalues,
+        two_edge_ids,
+        gauge_ids,
     )
 
 
@@ -577,8 +629,9 @@ def format_report(
 
     lines.append("")
     if alignment is None:
-        lines.append("座標 (m)。0 番を原点、1 番を +X 軸上、2 番を y > 0 に置いた座標系")
-        lines.append("  2 番が実際に 0→1 の向きの左にあるか右にあるかは、目で確かめてください")
+        g0, g1, g2 = (_hex(anchor_id) for anchor_id in solution.gauge_ids)
+        lines.append(f"座標 (m)。{g0} を原点、{g1} を +X 軸上、{g2} を y > 0 に置いた座標系")
+        lines.append(f"  {g2} が実際に {g0}→{g1} の向きの左にあるか右にあるかは、目で確かめてください")
         coords = solution.xy
     else:
         mirror = "鏡映あり" if alignment.mirrored else "鏡映なし"
@@ -694,7 +747,7 @@ def run(args: argparse.Namespace) -> list[str]:
     if reference and alignment is None:
         problems.append(
             "--reference の座標表と共通のアンカーが 1 台以下なので、手測りの座標系へ重ねられません。"
-            "上の座標は手測りとは別の座標系 (0 番が原点) です"
+            f"上の座標は手測りとは別の座標系 ({_hex(solution.gauge_ids[0])} が原点) です"
         )
     if problems:
         report.append("")
@@ -703,12 +756,19 @@ def run(args: argparse.Namespace) -> list[str]:
     if args.out:
         if problems:
             raise SurveyError("座標表を書き出しません。" + " ".join(problems), report=report)
+        # 座標表の検証 (note の長さなど) と書き込みに失敗しても、推定結果の表示は残す
         try:
             document = build_document(solution, alignment, reference, args.note)
+            Path(args.out).write_text(
+                json.dumps(document, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+            )
         except SurveyError as exc:
             exc.report = report
             raise
-        Path(args.out).write_text(json.dumps(document, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        except anchor_cli.InputError as exc:
+            raise SurveyError(f"座標表が正しくないので書き出しません: {exc}", report=report) from exc
+        except OSError as exc:
+            raise SurveyError(f"{args.out} に書き込めません: {exc}", report=report) from exc
         report.append("")
         report.append(f"{args.out} に座標表を書きました (source: survey)")
         report.append(f"  バイアス b ({solution.bias_m * 1000:+.0f} mm) は座標表に入りません")

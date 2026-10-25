@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import itertools
 import json
 import math
 import random
@@ -69,6 +70,16 @@ def _solve(
     return survey_solve.solve(edges, z, **kwargs)
 
 
+def _assert_same_shape(
+    layout: dict[int, tuple[float, float, float]], solution: survey_solve.Solution
+) -> None:
+    """推定した水平位置の全ての組の距離が、元の配置と一致することを確かめる (ゲージに依らない)。"""
+    xy = dict(zip(solution.ids, solution.xy, strict=True))
+    for a, b in itertools.combinations(sorted(layout), 2):
+        expected = math.dist(layout[a][:2], layout[b][:2])
+        assert math.dist(xy[a], xy[b]) == pytest.approx(expected, abs=2e-3), (hex(a), hex(b))
+
+
 def _reference_xy(layout: dict[int, tuple[float, float, float]]) -> dict[int, tuple[float, float]]:
     return {anchor_id: (p[0], p[1]) for anchor_id, p in layout.items()}
 
@@ -80,10 +91,15 @@ def test_recovers_layout_and_bias_without_noise() -> None:
     assert solution.bias_m == pytest.approx(0.08, abs=1e-3)
     assert solution.redundancy == 10 - 8
     assert solution.rms_m < 1e-3
-    # ゲージの固定 (0 番が原点、1 番が +X 軸上、2 番が y > 0) は元の配置と同じ向き
+    _assert_same_shape(LAYOUT, solution)
+    # ゲージ: ID 順に 0x0100 を原点、0x0101 を +X 軸上、0x0102 を y > 0 に置くので、元の配置と同じ向きになる
+    assert solution.gauge_ids == (0x0100, 0x0101, 0x0102)
     for anchor_id, (x, y) in zip(solution.ids, solution.xy, strict=True):
-        assert x == pytest.approx(LAYOUT[anchor_id][0], abs=1e-3)
-        assert y == pytest.approx(LAYOUT[anchor_id][1], abs=1e-3)
+        assert (x, y) == pytest.approx(LAYOUT[anchor_id][:2], abs=1e-3)
+    xy = dict(zip(solution.ids, solution.xy, strict=True))
+    assert xy[g0] == pytest.approx((0.0, 0.0), abs=1e-3)
+    assert xy[g1][1] == pytest.approx(0.0, abs=1e-3)
+    assert xy[g1][0] > 0
 
 
 def test_noise_stays_small_and_alignment_matches_reference() -> None:
@@ -376,3 +392,36 @@ def test_parse_survey_anchors_uses_last_start() -> None:
         "12:00:00 > SURVEY_START,coordinator=0x0100,samples=20,anchors=0x0100;0x0101;0x0102",
     ]
     assert survey_solve.parse_survey_anchors(lines) == {0x0100, 0x0101, 0x0102}
+
+
+def test_gauge_does_not_depend_on_id_order() -> None:
+    # ID 順の先頭 2 台が真上と真下 (水平位置が同じ) でも解ける
+    layout = {
+        0x0100: (0.0, 0.0, 0.0),
+        0x0101: (0.0, 0.0, 2.4),
+        0x0102: (0.44, 0.0, 0.0),
+        0x0103: (0.0, 1.17, 0.0),
+    }
+    solution = _solve(layout, _log(layout))
+
+    assert solution.rms_m < 1e-3
+    # 0x0101 は 0x0100 の真上にあるので +X 軸上の基準には使わず、ID 順で次の 0x0102 を使う
+    assert solution.gauge_ids == (0x0100, 0x0102, 0x0103)
+    _assert_same_shape(layout, solution)
+
+
+def test_cli_reports_output_errors_with_estimate(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    log = tmp_path / "survey.log"
+    log.write_text("\n".join(_log(LAYOUT)) + "\n", encoding="utf-8")
+
+    # note が長すぎて座標表の検証に通らない
+    assert survey_solve.main([str(log), "--out", str(tmp_path / "a.json"), "--note", "x" * 201]) == 1
+    captured = capsys.readouterr()
+    assert "座標表が正しくないので書き出しません" in captured.err
+    assert "残差 RMS" in captured.out
+
+    # 書き込み先のディレクトリが無い
+    assert survey_solve.main([str(log), "--out", str(tmp_path / "missing" / "a.json")]) == 1
+    captured = capsys.readouterr()
+    assert "に書き込めません" in captured.err
+    assert "残差 RMS" in captured.out
