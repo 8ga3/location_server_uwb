@@ -53,6 +53,10 @@ _COLLINEAR_RATIO = 0.05
 _GAUGE_MIN_RATIO = 0.3
 # 手測りの座標系へ重ねるとき、共通のアンカーの手測りの水平位置がこれ以上離れた組が無ければ、回転を決められない
 _MIN_REFERENCE_SPAN_M = 0.1
+# 推定した座標でこの距離以内に一直線に並ぶアンカーは、その直線について他のアンカーを折り返せる境界とみなす
+_FLIP_LINE_TOLERANCE_M = 0.1
+# MDS の初期解が退化したときに、全組の水平距離が少なくともこれだけ正になるようバイアスの初期値を下げる
+_BIAS_RETRY_MARGIN_M = 0.1
 
 
 class SurveyError(ValueError):
@@ -105,10 +109,10 @@ class Solution:
     redundancy: int
     iterations: int
     mds_eigenvalues: list[float]
-    # 測距の組み合わせで向きが決まらないアンカーの群。(u, v, 群) は、u と v を取り除くと群が残りから
-    # 切り離されることを表す。群を u と v を結ぶ直線について折り返しても測距は変わらないので、
-    # どちら側に置かれたかは MDS の初期解で決まる。_flippable_groups() を参照
-    flippable: list[tuple[int, int, list[int]]] = field(default_factory=list)
+    # 測距の組み合わせで向きが決まらないアンカーの群。(境界, 群) は、推定した座標で一直線に並ぶ境界の
+    # アンカーを取り除くと、群が残りから切り離されることを表す。群をその直線について折り返しても測距は
+    # 変わらないので、どちら側に置かれたかは初期解で決まる。_flippable_groups() を参照
+    flippable: list[tuple[list[int], list[int]]] = field(default_factory=list)
     # ゲージの基準にしたアンカー (原点、+X 軸上、y > 0)。_choose_gauge() を参照
     gauge_ids: tuple[int, int, int] = (0, 0, 0)
     # 1 本でも欠けると形が崩れる測距の組 (冗長剛性が無い)。空でなければ、同じ測距を満たす別の形が
@@ -341,21 +345,43 @@ def _mds(
     return xy, values
 
 
-def _flippable_groups(ids: list[int], edges: list[Edge]) -> list[tuple[int, int, list[int]]]:
-    """2 台を取り除くと測距のつながりが分かれる組と、切り離される側のアンカーの群を返す。
+def _flippable_groups(
+    ids: list[int], edges: list[Edge], xy: list[tuple[float, float]]
+) -> list[tuple[list[int], list[int]]]:
+    """取り除くと測距のつながりが分かれる、一直線に並んだアンカーの組 (境界) と、切り離される側の群を返す。
 
-    群は、その 2 台を結ぶ直線について折り返しても全ての測距が変わらない。JᵀJ のランクは落ちない
-    (連続には動かせない) のでランクの検査では見つからず、全体の鏡映 (--mirror) とも別に決まらない。
-    最も大きい側を基準とし、それ以外の群を返す。測距が 2 本だけのアンカーもここに含まれる。
+    群は境界の直線について折り返しても全ての測距が変わらない。JᵀJ のランクは落ちない (連続には動かせない)
+    のでランクの検査では見つからず、全体の鏡映 (--mirror) とも別に決まらない。最も大きい側を基準とし、
+    それ以外の群を返す。
+
+    2 台は常に一直線に並ぶので、全ての 2 台の組を境界の候補にする (測距が 2 本だけのアンカーもここで
+    見つかる)。3 台以上は、推定した座標 xy (ids と同じ並び) で _FLIP_LINE_TOLERANCE_M 以内に一直線に
+    並ぶものを候補にする。こちらは測距のつながりだけでは決まらない、実際の配置に依る折り返しである
+    (_critical_edges() の一般の位置での検査では見つからない)。
     """
     neighbors: dict[int, set[int]] = {anchor_id: set() for anchor_id in ids}
     for e in edges:
         neighbors[e.a].add(e.b)
         neighbors[e.b].add(e.a)
-    groups: list[tuple[int, int, list[int]]] = []
-    for u, v in itertools.combinations(ids, 2):
-        rest = [anchor_id for anchor_id in ids if anchor_id not in (u, v)]
-        unseen = set(rest)
+
+    separators: set[frozenset[int]] = set()
+    for a, b in itertools.combinations(range(len(ids)), 2):
+        separators.add(frozenset((ids[a], ids[b])))
+        length = math.dist(xy[a], xy[b])
+        if length < _FLIP_LINE_TOLERANCE_M:
+            continue
+        ux, uy = (xy[b][0] - xy[a][0]) / length, (xy[b][1] - xy[a][1]) / length
+        on_line = [
+            ids[k]
+            for k in range(len(ids))
+            if abs(ux * (xy[k][1] - xy[a][1]) - uy * (xy[k][0] - xy[a][0])) <= _FLIP_LINE_TOLERANCE_M
+        ]
+        if len(on_line) > 2:
+            separators.add(frozenset(on_line))
+
+    groups: list[tuple[list[int], list[int]]] = []
+    for separator in sorted(separators, key=lambda sep: (len(sep), sorted(sep))):
+        unseen = {anchor_id for anchor_id in ids if anchor_id not in separator}
         components: list[list[int]] = []
         while unseen:
             stack = [unseen.pop()]
@@ -369,7 +395,7 @@ def _flippable_groups(ids: list[int], edges: list[Edge]) -> list[tuple[int, int,
                         stack.append(other)
             components.append(sorted(component))
         components.sort(key=lambda c: (-len(c), c))
-        groups += [(u, v, component) for component in components[1:]]
+        groups += [(sorted(separator), component) for component in components[1:]]
     return groups
 
 
@@ -455,7 +481,6 @@ def solve(
             f"測距が 1 本以下のアンカーがあり、位置が決まりません: {names}。"
             "そのアンカーとの測距を取り直すか、--exclude を見直してください"
         )
-    flippable = _flippable_groups(ids, edges) if n > 3 else []
     critical = _critical_edges(ids, edges)
 
     estimate_bias = fixed_bias_m is None
@@ -577,17 +602,37 @@ def solve(
             points[o] = inner[pos]
         return points, bias, residuals, iterations, full_rank
 
-    gauge = _choose_gauge(mds_xy)
-    points, bias, residuals, iterations, full_rank = refine(gauge, mds_xy, initial_bias)
-    if not full_rank:
-        # ゲージの基準はバイアスを推定する前の MDS の座標で選ぶ。バイアスがあると、実際には水平位置が
-        # 重なる 2 台 (真上と真下) が離れて見え、それを基準に選ぶと、推定が進んで 2 台が重なったときに
-        # 回転が決まらなくなる。推定後の座標で基準を選び直せる場合は、そこからもう一度だけ解く
-        retry = _choose_gauge(points)
-        if retry != gauge:
-            gauge = retry
-            points, bias, residuals, more, full_rank = refine(gauge, points, bias)
-            iterations += more
+    # 初期値の候補。まずバイアス 0 (固定するならその値) で試す。負のバイアスで測距が高さの差より短く
+    # なると、MDS の水平距離が全て 0 になって全点が重なり、最小二乗がそこから動けない。その場合やランク
+    # 不足になった場合は、全組の水平距離が正になるようバイアスの初期値を下げて試し直す
+    zmap = dict(zip(ids, z, strict=True))
+    starts = [initial_bias]
+    if estimate_bias:
+        lowered = min(e.distance_m - abs(zmap[e.a] - zmap[e.b]) for e in edges) - _BIAS_RETRY_MARGIN_M
+        if lowered < initial_bias:
+            starts.append(lowered)
+
+    full_rank = False
+    iterations = 0
+    for attempt, start_bias in enumerate(starts):
+        if attempt > 0:
+            mds_xy, eigenvalues = _mds(ids, z, edges, start_bias)
+        if max(math.dist(p, mds_xy[0]) for p in mds_xy) < 1e-9:
+            continue
+        gauge = _choose_gauge(mds_xy)
+        points, bias, residuals, more, full_rank = refine(gauge, mds_xy, start_bias)
+        iterations += more
+        if not full_rank:
+            # ゲージの基準はバイアスを推定する前の MDS の座標で選ぶ。バイアスがあると、実際には水平位置が
+            # 重なる 2 台 (真上と真下) が離れて見え、それを基準に選ぶと、推定が進んで 2 台が重なったときに
+            # 回転が決まらなくなる。推定後の座標で基準を選び直せる場合は、そこからもう一度だけ解く
+            retry = _choose_gauge(points)
+            if retry != gauge:
+                gauge = retry
+                points, bias, residuals, more, full_rank = refine(gauge, points, bias)
+                iterations += more
+        if full_rank:
+            break
     if not full_rank:
         raise SurveyError(
             "測距の組み合わせでは座標が一意に決まりません (残差を変えずに動かせる向きがあります)。"
@@ -596,6 +641,7 @@ def solve(
 
     by_edge = {(e.a, e.b): r for e, r in zip(edges, residuals, strict=True)}
     gauge_ids = (ids[gauge[0]], ids[gauge[1]], ids[gauge[2]])
+    flippable = _flippable_groups(ids, edges, points) if n > 3 else []
     return Solution(
         ids,
         points,
@@ -727,10 +773,11 @@ def format_report(
             f"  次の組の測距は 1 本でも欠けると形が崩れ、同じ測距を満たす別の形がありえます: {names}。"
             "測距の組を足すか、形が正しいか目で確かめてください"
         )
-    for u, v, group in solution.flippable:
+    for separator, group in solution.flippable:
         names = ", ".join(_hex(anchor_id) for anchor_id in group)
+        line = " と ".join(_hex(anchor_id) for anchor_id in separator)
         lines.append(
-            f"  {names} は、{_hex(u)} と {_hex(v)} を結ぶ直線について折り返しても測距が変わりません。"
+            f"  {names} は、{line} を結ぶ直線について折り返しても測距が変わりません。"
             "置かれた側が正しいか目で確かめてください"
         )
 
