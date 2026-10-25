@@ -50,7 +50,14 @@ _COLLINEAR_RATIO = 0.05
 
 
 class SurveyError(ValueError):
-    """ログや入力から座標を推定できない場合に送出する。"""
+    """ログや入力から座標を推定できない場合に送出する。
+
+    推定はできたが座標表を書き出せない場合は、診断に使えるよう推定結果の表示を `report` に持たせる。
+    """
+
+    def __init__(self, message: str, report: list[str] | None = None) -> None:
+        super().__init__(message)
+        self.report = report
 
 
 @dataclass
@@ -147,6 +154,24 @@ def parse_log(lines: list[str]) -> list[PairSamples]:
             raise SurveyError(f"SURVEY_PAIR 行を解釈できません: {line.strip()}") from exc
         pairs.append(PairSamples(initiator, responder, fields.get("status", ""), samples))
     return pairs
+
+
+def parse_survey_anchors(lines: list[str]) -> set[int]:
+    """最後の SURVEY_START 行の anchors (コーディネータが測距しようとしたアンカーの一覧) を読む。"""
+    anchors: set[int] = set()
+    for line in lines:
+        match = _START_PATTERN.search(line)
+        if match is None:
+            continue
+        anchors = set()
+        for item in line[match.end() :].strip().split(","):
+            key, _, value = item.partition("=")
+            if key == "anchors" and value:
+                try:
+                    anchors = {_parse_id(v) for v in value.split(";")}
+                except ValueError as exc:
+                    raise SurveyError(f"SURVEY_START 行を解釈できません: {line.strip()}") from exc
+    return anchors
 
 
 def build_edges(pairs: list[PairSamples], excluded: set[frozenset[int]]) -> list[Edge]:
@@ -645,6 +670,10 @@ def run(args: argparse.Namespace) -> list[str]:
     reference = _load_reference(Path(args.reference)) if args.reference else {}
     edges = build_edges(pairs, _parse_exclude(args.exclude))
     ids = sorted({e.a for e in edges} | {e.b for e in edges})
+    # 測るはずだったのに測距値が 1 本も残らなかったアンカー (全ての組が失敗した、--exclude で全て外した、
+    # 起床しなかった)。計算から消えるので、そのまま座標表を書き出すと apply でサーバーから削除されてしまう
+    expected = parse_survey_anchors(lines) | {p.initiator for p in pairs} | {p.responder for p in pairs}
+    missing = sorted(expected - set(ids))
     z_by_id = {
         anchor_id: reference[anchor_id]["z"] if anchor_id in reference else args.z for anchor_id in ids
     }
@@ -655,8 +684,30 @@ def run(args: argparse.Namespace) -> list[str]:
     alignment = align(solution, reference_xy, mirror=mirror) if reference else None
 
     report = format_report(pairs, edges, solution, alignment, reference)
+    problems: list[str] = []
+    if missing:
+        names = ", ".join(_hex(anchor_id) for anchor_id in missing)
+        problems.append(
+            f"測距値が 1 本も無いアンカーがあります: {names}。座標表に入らないので、apply するとサーバーの"
+            "構成から削除されます"
+        )
+    if reference and alignment is None:
+        problems.append(
+            "--reference の座標表と共通のアンカーが 1 台以下なので、手測りの座標系へ重ねられません。"
+            "上の座標は手測りとは別の座標系 (0 番が原点) です"
+        )
+    if problems:
+        report.append("")
+        report += [f"注意: {problem}" for problem in problems]
+
     if args.out:
-        document = build_document(solution, alignment, reference, args.note)
+        if problems:
+            raise SurveyError("座標表を書き出しません。" + " ".join(problems), report=report)
+        try:
+            document = build_document(solution, alignment, reference, args.note)
+        except SurveyError as exc:
+            exc.report = report
+            raise
         Path(args.out).write_text(json.dumps(document, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         report.append("")
         report.append(f"{args.out} に座標表を書きました (source: survey)")
@@ -704,6 +755,8 @@ def main(argv: list[str] | None = None) -> int:
         for line in run(args):
             print(line)
     except SurveyError as exc:
+        for line in exc.report or []:
+            print(line)
         print(f"エラー: {exc}", file=sys.stderr)
         return 1
     return 0

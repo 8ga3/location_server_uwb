@@ -317,3 +317,62 @@ def test_cli_refuses_ambiguous_mirror_and_accepts_explicit_choice(tmp_path: Path
         survey_solve.main([str(log), "--reference", str(reference), "--out", str(out), "--mirror", "no"]) == 0
     )
     assert out.exists()
+
+
+def _write_reference(path: Path, ids: list[int]) -> None:
+    path.write_text(
+        json.dumps(
+            {
+                "anchors": [
+                    {"id": f"0x{i:04X}", "x": LAYOUT[i][0], "y": LAYOUT[i][1], "z": LAYOUT[i][2]} for i in ids
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+@pytest.mark.parametrize("failed", [True, False])
+def test_cli_refuses_anchor_without_measurements(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], failed: bool
+) -> None:
+    # 6 台目は SURVEY_START の一覧にあるが、全ての組が失敗した (failed) か、起床せず組が 1 つも無い
+    layout = {**LAYOUT, 0x0105: (2.6, 2.4, 0.3)}
+    lines = _log(layout, skip=_skip_both([(i, 0x0105) for i in LAYOUT]))
+    if not failed:
+        lines = [line for line in lines if "j=0x0105" not in line and "i=0x0105" not in line]
+    log = tmp_path / "survey.log"
+    log.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    out = tmp_path / "survey.json"
+
+    assert survey_solve.main([str(log)]) == 0
+    assert "測距値が 1 本も無いアンカーがあります: 0x0105" in capsys.readouterr().out
+
+    assert survey_solve.main([str(log), "--out", str(out)]) == 1
+    captured = capsys.readouterr()
+    assert not out.exists()
+    assert "0x0105" in captured.err
+    # 書き出さなくても、推定結果の表示は残す
+    assert "残差 RMS" in captured.out
+
+
+def test_cli_refuses_reference_without_overlap(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    log = tmp_path / "survey.log"
+    log.write_text("\n".join(_log(LAYOUT)) + "\n", encoding="utf-8")
+    reference = tmp_path / "room.json"
+    _write_reference(reference, [0x0100])
+    out = tmp_path / "survey.json"
+
+    assert survey_solve.main([str(log), "--reference", str(reference)]) == 0
+    assert "手測りの座標系へ重ねられません" in capsys.readouterr().out
+    assert survey_solve.main([str(log), "--reference", str(reference), "--out", str(out)]) == 1
+    assert not out.exists()
+    assert "手測りの座標系へ重ねられません" in capsys.readouterr().err
+
+
+def test_parse_survey_anchors_uses_last_start() -> None:
+    lines = [
+        "SURVEY_START,coordinator=0x0100,samples=20,anchors=0x0100;0x0101",
+        "12:00:00 > SURVEY_START,coordinator=0x0100,samples=20,anchors=0x0100;0x0101;0x0102",
+    ]
+    assert survey_solve.parse_survey_anchors(lines) == {0x0100, 0x0101, 0x0102}
