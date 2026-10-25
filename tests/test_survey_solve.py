@@ -265,9 +265,10 @@ def test_anchor_with_two_edges_is_reported() -> None:
     skip = _skip_both([(0x0104, 0x0102), (0x0104, 0x0103)])
     solution = _solve(LAYOUT, _log(LAYOUT, skip=skip), fixed_bias_m=0.0)
 
-    assert solution.two_edge_ids == [0x0104]
+    # 0x0104 は 0x0100 と 0x0101 だけと測っているので、その 2 台を結ぶ直線について折り返せる
+    assert solution.flippable == [(0x0100, 0x0101, [0x0104])]
     report = survey_solve.format_report([], [], solution, None, {})
-    assert any("0x0104 は測距が 2 本だけ" in line for line in report)
+    assert any("0x0104 は、0x0100 と 0x0101 を結ぶ直線について折り返しても" in line for line in report)
 
 
 @pytest.mark.parametrize(
@@ -421,3 +422,59 @@ def test_cli_reports_output_errors_with_estimate(tmp_path: Path, capsys: pytest.
     captured = capsys.readouterr()
     assert "に書き込めません" in captured.err
     assert "残差 RMS" in captured.out
+
+
+def _two_cluster_log() -> tuple[dict[int, tuple[float, float, float]], list[str]]:
+    # 6 台で {0, 1, 2, 3} と {0, 1, 4, 5} の内部だけを測る。どのアンカーも測距は 3 本以上で JᵀJ も
+    # 満ランクだが、4 と 5 を 0-1 の直線について折り返しても測距は変わらない
+    layout = {
+        0x0100: (0.0, 0.0, 0.25),
+        0x0101: (2.0, 0.0, 0.25),
+        0x0102: (2.2, 1.5, 0.25),
+        0x0103: (0.1, 1.6, 0.25),
+        0x0104: (2.3, -1.4, 0.25),
+        0x0105: (-0.2, -1.5, 0.25),
+    }
+    upper, lower = [0x0102, 0x0103], [0x0104, 0x0105]
+    return layout, _log(layout, skip=_skip_both([(a, b) for a in upper for b in lower]))
+
+
+def test_partial_flip_is_detected() -> None:
+    layout, lines = _two_cluster_log()
+    solution = _solve(layout, lines, fixed_bias_m=0.0)
+
+    # 切り離される 2 つの群は同じ大きさなので、ID の小さい側 (0x0102, 0x0103) を基準にする
+    assert solution.flippable == [(0x0100, 0x0101, [0x0104, 0x0105])]
+
+
+def test_cli_refuses_partial_flip_without_confirmation(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _, lines = _two_cluster_log()
+    log = tmp_path / "survey.log"
+    log.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    out = tmp_path / "survey.json"
+
+    args = [str(log), "--fixed-bias-mm", "0", "--out", str(out)]
+    assert survey_solve.main(args) == 1
+    assert not out.exists()
+    assert "--accept-flip" in capsys.readouterr().err
+    assert survey_solve.main([*args, "--accept-flip"]) == 0
+    assert out.exists()
+
+
+def test_gauge_is_rechosen_when_bias_collapses_baseline() -> None:
+    # 真上と真下の 2 台 (0x0100 と 0x0101) は、バイアスを除く前の距離では水平に離れて見えるので、
+    # 最初は 0x0101 を +X 軸上の基準に選ぶ。推定が進んで 2 台が重なったら、基準を選び直して解き直す
+    layout = {
+        0x0100: (0.0, 0.0, 0.0),
+        0x0101: (0.0, 0.0, 2.4),
+        0x0102: (0.44, 0.0, 0.0),
+        0x0103: (0.0, 1.17, 0.0),
+    }
+    solution = _solve(layout, _log(layout, bias_m=0.08))
+
+    assert solution.rms_m < 1e-3
+    assert solution.bias_m == pytest.approx(0.08, abs=1e-3)
+    assert solution.gauge_ids[1] != 0x0101
+    _assert_same_shape(layout, solution)
