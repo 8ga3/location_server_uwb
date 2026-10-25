@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 import argparse
+import itertools
 import json
 import math
 import re
@@ -101,9 +102,10 @@ class Solution:
     redundancy: int
     iterations: int
     mds_eigenvalues: list[float]
-    # 測距が 2 本だけのアンカー。その 2 台を結ぶ直線について反対側にも同じ残差の解があり、
-    # どちらに置かれたかは MDS の初期解で決まる
-    two_edge_ids: list[int] = field(default_factory=list)
+    # 測距の組み合わせで向きが決まらないアンカーの群。(u, v, 群) は、u と v を取り除くと群が残りから
+    # 切り離されることを表す。群を u と v を結ぶ直線について折り返しても測距は変わらないので、
+    # どちら側に置かれたかは MDS の初期解で決まる。_flippable_groups() を参照
+    flippable: list[tuple[int, int, list[int]]] = field(default_factory=list)
     # ゲージの基準にしたアンカー (原点、+X 軸上、y > 0)。_choose_gauge() を参照
     gauge_ids: tuple[int, int, int] = (0, 0, 0)
     rms_m: float = field(init=False)
@@ -333,6 +335,38 @@ def _mds(
     return xy, values
 
 
+def _flippable_groups(ids: list[int], edges: list[Edge]) -> list[tuple[int, int, list[int]]]:
+    """2 台を取り除くと測距のつながりが分かれる組と、切り離される側のアンカーの群を返す。
+
+    群は、その 2 台を結ぶ直線について折り返しても全ての測距が変わらない。JᵀJ のランクは落ちない
+    (連続には動かせない) のでランクの検査では見つからず、全体の鏡映 (--mirror) とも別に決まらない。
+    最も大きい側を基準とし、それ以外の群を返す。測距が 2 本だけのアンカーもここに含まれる。
+    """
+    neighbors: dict[int, set[int]] = {anchor_id: set() for anchor_id in ids}
+    for e in edges:
+        neighbors[e.a].add(e.b)
+        neighbors[e.b].add(e.a)
+    groups: list[tuple[int, int, list[int]]] = []
+    for u, v in itertools.combinations(ids, 2):
+        rest = [anchor_id for anchor_id in ids if anchor_id not in (u, v)]
+        unseen = set(rest)
+        components: list[list[int]] = []
+        while unseen:
+            stack = [unseen.pop()]
+            component = []
+            while stack:
+                node = stack.pop()
+                component.append(node)
+                for other in neighbors[node]:
+                    if other in unseen:
+                        unseen.remove(other)
+                        stack.append(other)
+            components.append(sorted(component))
+        components.sort(key=lambda c: (-len(c), c))
+        groups += [(u, v, component) for component in components[1:]]
+    return groups
+
+
 def solve(
     edges: list[Edge],
     z_by_id: dict[int, float],
@@ -348,7 +382,6 @@ def solve(
     n = len(ids)
     if n < 3:
         raise SurveyError(f"測距できたアンカーが {n} 台しかありません。3 台以上が必要です")
-    index = {anchor_id: i for i, anchor_id in enumerate(ids)}
     z = [z_by_id.get(anchor_id, 0.0) for anchor_id in ids]
 
     # 測距が 1 本以下のアンカーは、位置が円周上 (または全く) 決まらない。観測数の勘定が足りていても
@@ -364,7 +397,7 @@ def solve(
             f"測距が 1 本以下のアンカーがあり、位置が決まりません: {names}。"
             "そのアンカーとの測距を取り直すか、--exclude を見直してください"
         )
-    two_edge_ids = [anchor_id for anchor_id in ids if degree[anchor_id] == 2] if n > 3 else []
+    flippable = _flippable_groups(ids, edges) if n > 3 else []
 
     estimate_bias = fixed_bias_m is None
     # 未知数: 1 番の x、2 番以降の (x, y)、(推定するなら) b
@@ -378,105 +411,130 @@ def solve(
 
     initial_bias = 0.0 if fixed_bias_m is None else fixed_bias_m
     mds_xy, eigenvalues = _mds(ids, z, edges, initial_bias)
-    # 内部ではゲージの基準の 3 台を先頭に並べ替えて解き、最後に ids の並びへ戻す
-    gauge = _choose_gauge(mds_xy)
-    order = list(gauge) + [k for k in range(n) if k not in gauge]
-    index = {ids[o]: pos for pos, o in enumerate(order)}
-    z_inner = [z[o] for o in order]
-    xy = _gauge_fix([mds_xy[o] for o in order])
 
-    def pack(points: list[tuple[float, float]], bias: float) -> list[float]:
-        theta = [points[1][0]]
-        for x, y in points[2:]:
-            theta += [x, y]
-        if estimate_bias:
-            theta.append(bias)
-        return theta
+    def refine(
+        gauge: tuple[int, int, int], start_xy: list[tuple[float, float]], start_bias: float
+    ) -> tuple[list[tuple[float, float]], float, list[float], int, bool]:
+        """gauge をゲージの基準にして最小二乗を解く。座標は ids の並びで受け渡す。
 
-    def unpack(theta: list[float]) -> tuple[list[tuple[float, float]], float]:
-        points = [(0.0, 0.0), (theta[0], 0.0)]
-        for k in range(n - 2):
-            points.append((theta[1 + 2 * k], theta[2 + 2 * k]))
-        bias = theta[-1] if estimate_bias else initial_bias
-        return points, bias
+        内部ではゲージの基準の 3 台を先頭に並べ替えて解く。戻り値の最後は、解での JᵀJ が特異に
+        近くない (未知数が全て観測で決まる) か。
+        """
+        order = list(gauge) + [k for k in range(n) if k not in gauge]
+        index = {ids[o]: pos for pos, o in enumerate(order)}
+        z_inner = [z[o] for o in order]
 
-    def x_index(i: int) -> int | None:
-        return None if i == 0 else (0 if i == 1 else 1 + 2 * (i - 2))
-
-    def y_index(i: int) -> int | None:
-        return None if i < 2 else 2 + 2 * (i - 2)
-
-    def evaluate(theta: list[float]) -> tuple[list[float], list[list[float]]]:
-        points, bias = unpack(theta)
-        residuals: list[float] = []
-        jacobian: list[list[float]] = []
-        for e in edges:
-            i, j = index[e.a], index[e.b]
-            dx = points[i][0] - points[j][0]
-            dy = points[i][1] - points[j][1]
-            dz = z_inner[i] - z_inner[j]
-            dist = math.sqrt(dx * dx + dy * dy + dz * dz)
-            residuals.append(dist + bias - e.distance_m)
-            row = [0.0] * unknowns
-            if dist > 0:
-                for k, sign in ((i, 1.0), (j, -1.0)):
-                    xi, yi = x_index(k), y_index(k)
-                    if xi is not None:
-                        row[xi] += sign * dx / dist
-                    if yi is not None:
-                        row[yi] += sign * dy / dist
+        def pack(points: list[tuple[float, float]], bias: float) -> list[float]:
+            theta = [points[1][0]]
+            for x, y in points[2:]:
+                theta += [x, y]
             if estimate_bias:
-                row[-1] = 1.0
-            jacobian.append(row)
-        return residuals, jacobian
+                theta.append(bias)
+            return theta
 
-    theta = pack(xy, initial_bias)
-    residuals, jacobian = evaluate(theta)
-    cost = sum(r * r for r in residuals)
-    damping = 1e-3
-    iterations = 0
-    while iterations < _MAX_ITERATIONS:
-        iterations += 1
-        jtj = [[sum(row[a] * row[b] for row in jacobian) for b in range(unknowns)] for a in range(unknowns)]
-        jtr = [sum(row[a] * r for row, r in zip(jacobian, residuals, strict=True)) for a in range(unknowns)]
-        improved = False
-        while damping < 1e12:
-            lhs = [
-                [jtj[a][b] + (damping * jtj[a][a] if a == b else 0.0) for b in range(unknowns)]
-                for a in range(unknowns)
+        def unpack(theta: list[float]) -> tuple[list[tuple[float, float]], float]:
+            points = [(0.0, 0.0), (theta[0], 0.0)]
+            for k in range(n - 2):
+                points.append((theta[1 + 2 * k], theta[2 + 2 * k]))
+            bias = theta[-1] if estimate_bias else initial_bias
+            return points, bias
+
+        def x_index(i: int) -> int | None:
+            return None if i == 0 else (0 if i == 1 else 1 + 2 * (i - 2))
+
+        def y_index(i: int) -> int | None:
+            return None if i < 2 else 2 + 2 * (i - 2)
+
+        def evaluate(theta: list[float]) -> tuple[list[float], list[list[float]]]:
+            points, bias = unpack(theta)
+            residuals: list[float] = []
+            jacobian: list[list[float]] = []
+            for e in edges:
+                i, j = index[e.a], index[e.b]
+                dx = points[i][0] - points[j][0]
+                dy = points[i][1] - points[j][1]
+                dz = z_inner[i] - z_inner[j]
+                dist = math.sqrt(dx * dx + dy * dy + dz * dz)
+                residuals.append(dist + bias - e.distance_m)
+                row = [0.0] * unknowns
+                if dist > 0:
+                    for k, sign in ((i, 1.0), (j, -1.0)):
+                        xi, yi = x_index(k), y_index(k)
+                        if xi is not None:
+                            row[xi] += sign * dx / dist
+                        if yi is not None:
+                            row[yi] += sign * dy / dist
+                if estimate_bias:
+                    row[-1] = 1.0
+                jacobian.append(row)
+            return residuals, jacobian
+
+        theta = pack(_gauge_fix([start_xy[o] for o in order]), start_bias)
+        residuals, jacobian = evaluate(theta)
+        cost = sum(r * r for r in residuals)
+        damping = 1e-3
+        iterations = 0
+        while iterations < _MAX_ITERATIONS:
+            iterations += 1
+            jtj = [
+                [sum(row[a] * row[b] for row in jacobian) for b in range(unknowns)] for a in range(unknowns)
             ]
-            for a in range(unknowns):
-                # 対角が 0 の未知数 (どの観測にも効かない) があっても解けるようにする
-                lhs[a][a] += 1e-12
-            step = _solve_linear(lhs, [-g for g in jtr])
-            candidate = [t + s for t, s in zip(theta, step, strict=True)]
-            cand_residuals, cand_jacobian = evaluate(candidate)
-            cand_cost = sum(r * r for r in cand_residuals)
-            if cand_cost <= cost:
-                theta, residuals, jacobian, cost = candidate, cand_residuals, cand_jacobian, cand_cost
-                damping = max(damping / 10, 1e-12)
-                improved = True
+            jtr = [
+                sum(row[a] * r for row, r in zip(jacobian, residuals, strict=True)) for a in range(unknowns)
+            ]
+            improved = False
+            while damping < 1e12:
+                lhs = [
+                    [jtj[a][b] + (damping * jtj[a][a] if a == b else 0.0) for b in range(unknowns)]
+                    for a in range(unknowns)
+                ]
+                for a in range(unknowns):
+                    # 対角が 0 の未知数 (どの観測にも効かない) があっても解けるようにする
+                    lhs[a][a] += 1e-12
+                step = _solve_linear(lhs, [-g for g in jtr])
+                candidate = [t + s for t, s in zip(theta, step, strict=True)]
+                cand_residuals, cand_jacobian = evaluate(candidate)
+                cand_cost = sum(r * r for r in cand_residuals)
+                if cand_cost <= cost:
+                    theta, residuals, jacobian, cost = candidate, cand_residuals, cand_jacobian, cand_cost
+                    damping = max(damping / 10, 1e-12)
+                    improved = True
+                    break
+                damping *= 10
+            if not improved or max(abs(s) for s in step) < _STEP_TOLERANCE_M:
                 break
-            damping *= 10
-        if not improved or max(abs(s) for s in step) < _STEP_TOLERANCE_M:
-            break
 
-    # 観測数が足りていても、2 つの塊が 2 本の測距だけでつながっている場合などは、解の近くで
-    # 座標を動かしても残差が変わらない方向が残る。解での JᵀJ が特異に近ければ断る
-    jtj = [[sum(row[a] * row[b] for row in jacobian) for b in range(unknowns)] for a in range(unknowns)]
-    jtj_eigen, _ = _jacobi_eigen(jtj)
-    if jtj_eigen[-1] <= jtj_eigen[0] * _RANK_TOLERANCE:
+        # 観測数が足りていても、2 つの塊が 2 本の測距だけでつながっている場合などは、解の近くで
+        # 座標を動かしても残差が変わらない方向が残る。解での JᵀJ が特異に近いかを調べる
+        jtj = [[sum(row[a] * row[b] for row in jacobian) for b in range(unknowns)] for a in range(unknowns)]
+        jtj_eigen, _ = _jacobi_eigen(jtj)
+        full_rank = jtj_eigen[-1] > jtj_eigen[0] * _RANK_TOLERANCE
+
+        inner, bias = unpack(theta)
+        # 最小二乗の途中で鏡映が入れ替わることはないが、y > 0 に置くアンカーの符号だけは揃え直す
+        inner = _gauge_fix(inner)
+        points = [(0.0, 0.0)] * n
+        for pos, o in enumerate(order):
+            points[o] = inner[pos]
+        return points, bias, residuals, iterations, full_rank
+
+    gauge = _choose_gauge(mds_xy)
+    points, bias, residuals, iterations, full_rank = refine(gauge, mds_xy, initial_bias)
+    if not full_rank:
+        # ゲージの基準はバイアスを推定する前の MDS の座標で選ぶ。バイアスがあると、実際には水平位置が
+        # 重なる 2 台 (真上と真下) が離れて見え、それを基準に選ぶと、推定が進んで 2 台が重なったときに
+        # 回転が決まらなくなる。推定後の座標で基準を選び直せる場合は、そこからもう一度だけ解く
+        retry = _choose_gauge(points)
+        if retry != gauge:
+            gauge = retry
+            points, bias, residuals, more, full_rank = refine(gauge, points, bias)
+            iterations += more
+    if not full_rank:
         raise SurveyError(
             "測距の組み合わせでは座標が一意に決まりません (残差を変えずに動かせる向きがあります)。"
             "欠けている組を取り直すか、--exclude を見直してください"
         )
 
-    inner, bias = unpack(theta)
-    # 最小二乗の途中で鏡映が入れ替わることはないが、y > 0 に置くアンカーの符号だけは揃え直す
-    inner = _gauge_fix(inner)
-    points = [(0.0, 0.0)] * n
-    for pos, o in enumerate(order):
-        points[o] = inner[pos]
     by_edge = {(e.a, e.b): r for e, r in zip(edges, residuals, strict=True)}
     gauge_ids = (ids[gauge[0]], ids[gauge[1]], ids[gauge[2]])
     return Solution(
@@ -489,7 +547,7 @@ def solve(
         redundancy,
         iterations,
         eigenvalues,
-        two_edge_ids,
+        flippable,
         gauge_ids,
     )
 
@@ -597,10 +655,11 @@ def format_report(
             "  冗長度が 0 なので残差は常に 0 になり、測距の誤りを残差から見つけられません。"
             "手測りの座標と突き合わせてください"
         )
-    for anchor_id in solution.two_edge_ids:
+    for u, v, group in solution.flippable:
+        names = ", ".join(_hex(anchor_id) for anchor_id in group)
         lines.append(
-            f"  {_hex(anchor_id)} は測距が 2 本だけです。相手の 2 台を結ぶ直線の反対側にも同じ残差の"
-            "位置があるので、置かれた側が正しいか確かめてください"
+            f"  {names} は、{_hex(u)} と {_hex(v)} を結ぶ直線について折り返しても測距が変わりません。"
+            "置かれた側が正しいか目で確かめてください"
         )
 
     lines.append("")
@@ -749,6 +808,11 @@ def run(args: argparse.Namespace) -> list[str]:
             "--reference の座標表と共通のアンカーが 1 台以下なので、手測りの座標系へ重ねられません。"
             f"上の座標は手測りとは別の座標系 ({_hex(solution.gauge_ids[0])} が原点) です"
         )
+    if solution.flippable and not args.accept_flip:
+        problems.append(
+            "測距の組み合わせで向きが決まらないアンカーがあります (上の表示を参照)。--mirror では"
+            "決まらないので、測距の組を足すか、向きを目で確かめてから --accept-flip を付けてください"
+        )
     if problems:
         report.append("")
         report += [f"注意: {problem}" for problem in problems]
@@ -803,6 +867,12 @@ def build_parser() -> argparse.ArgumentParser:
         default="auto",
         help="手測りの座標系へ重ねるときの鏡映。auto は手測りとの差で決める。共通のアンカーが 3 台未満か"
         "一直線に並ぶときは判定できないので、yes / no で指定する",
+    )
+    parser.add_argument(
+        "--accept-flip",
+        action="store_true",
+        help="2 台を結ぶ直線について一部のアンカーを折り返しても測距が変わらない配置で、向きを目で確かめた"
+        "ことを示す。付けないとその配置の座標表は書き出さない",
     )
     parser.add_argument("--out", help="推定した座標表を書き出すファイル (source: survey)")
     parser.add_argument("--note", help="座標表の note")
