@@ -55,6 +55,9 @@ _GAUGE_MIN_RATIO = 0.3
 _MIN_REFERENCE_SPAN_M = 0.1
 # 推定した座標でこの距離以内に一直線に並ぶアンカーは、その直線について他のアンカーを折り返せる境界とみなす
 _FLIP_LINE_TOLERANCE_M = 0.1
+# 鏡映の有無を手測りとの差で選ぶとき、逆の向きとの差の RMS がこれ以上離れていなければ判定しない。
+# survey の座標の誤差 (数十 mm) 程度の違いは、向きを決める根拠にならない
+_MIRROR_MARGIN_M = 0.05
 # MDS の初期解が退化したときに、全組の水平距離が少なくともこれだけ正になるようバイアスの初期値を下げる
 _BIAS_RETRY_MARGIN_M = 0.1
 
@@ -685,8 +688,10 @@ def align(
     この曖昧さは解けない。
 
     鏡映の有無は、`mirror` を渡せばその向きにし、渡さなければ手測りとの差の小さい方を選ぶ。
-    ただし共通のアンカーが 3 台未満か、手測りの座標で一直線に並ぶときは、どちらの向きでも差が
-    同じになり判定できないので、`ambiguous` を立てる。
+    ただし次の場合は判定できないので、`ambiguous` を立てる。
+    - 共通のアンカーが 3 台未満か、手測りの座標か推定した座標のどちらかで一直線に並ぶ。推定した側が
+      一直線なら、手測りの誤差で手測り側が少し曲がっていても、両方の向きの差は同じになる
+    - 逆の向きとの差の RMS が _MIRROR_MARGIN_M 以上離れていない
     """
     common = [i for i, anchor_id in enumerate(solution.ids) if anchor_id in reference_xy]
     spans = [
@@ -717,7 +722,11 @@ def align(
         return candidates[0]
     best, other = sorted(candidates, key=lambda a: a.rms_m)
     best.alternative_rms_m = other.rms_m
-    best.ambiguous = _is_collinear([reference_xy[solution.ids[i]] for i in common])
+    best.ambiguous = (
+        _is_collinear([reference_xy[solution.ids[i]] for i in common])
+        or _is_collinear([solution.xy[i] for i in common])
+        or other.rms_m - best.rms_m < _MIRROR_MARGIN_M
+    )
     return best
 
 
@@ -816,7 +825,8 @@ def format_report(
         lines.append(f"座標 (m)。手測りの座標系へ回転・平行移動で重ねた ({mirror})")
         if alignment.ambiguous:
             lines.append(
-                "  手測りの座標表と共通のアンカーが 3 台未満か一直線に並ぶので、鏡映の有無を判定できません。"
+                "  手測りの座標表と共通のアンカーが 3 台未満か一直線に並ぶ (または逆の向きとの差が小さい)"
+                "ので、鏡映の有無を判定できません。"
                 "向きを目で確かめ、--mirror yes / no で指定してください"
             )
         elif alignment.alternative_rms_m is not None:

@@ -585,3 +585,21 @@ def test_degenerate_initial_layout_is_retried() -> None:
     xy = dict(zip(solution.ids, solution.xy, strict=True))
     for a, b in itertools.combinations(sorted(layout), 2):
         assert math.dist(xy[a], xy[b]) == pytest.approx(math.dist(layout[a][:2], layout[b][:2]), abs=0.03)
+
+
+def test_alignment_is_ambiguous_when_estimate_is_collinear() -> None:
+    # 推定した側の共通アンカーが一直線に並ぶと、手測りの誤差で手測り側が少し曲がっていても、
+    # 両方の向きの差は同じになり、4 台目を置く側を決められない
+    layout = {
+        0x0100: (0.0, 0.0, 0.25),
+        0x0101: (0.6, 0.0, 0.25),
+        0x0102: (1.5, 0.0, 0.25),
+        0x0103: (0.0, 0.8, 0.25),
+    }
+    solution = _solve(layout, _log(layout))
+    reference = {0x0100: (0.0, 0.0), 0x0101: (0.6, 0.12), 0x0102: (1.5, 0.0)}
+
+    alignment = survey_solve.align(solution, reference)
+    assert alignment is not None
+    assert alignment.ambiguous
+    assert alignment.alternative_rms_m == pytest.approx(alignment.rms_m, abs=1e-3)
