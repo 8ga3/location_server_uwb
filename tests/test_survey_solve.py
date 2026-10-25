@@ -266,7 +266,7 @@ def test_anchor_with_two_edges_is_reported() -> None:
     solution = _solve(LAYOUT, _log(LAYOUT, skip=skip), fixed_bias_m=0.0)
 
     # 0x0104 は 0x0100 と 0x0101 だけと測っているので、その 2 台を結ぶ直線について折り返せる
-    assert solution.flippable == [(0x0100, 0x0101, [0x0104])]
+    assert solution.flippable == [([0x0100, 0x0101], [0x0104])]
     report = survey_solve.format_report([], [], solution, None, {})
     assert any("0x0104 は、0x0100 と 0x0101 を結ぶ直線について折り返しても" in line for line in report)
 
@@ -444,7 +444,7 @@ def test_partial_flip_is_detected() -> None:
     solution = _solve(layout, lines, fixed_bias_m=0.0)
 
     # 切り離される 2 つの群は同じ大きさなので、ID の小さい側 (0x0102, 0x0103) を基準にする
-    assert solution.flippable == [(0x0100, 0x0101, [0x0104, 0x0105])]
+    assert solution.flippable == [([0x0100, 0x0101], [0x0104, 0x0105])]
 
 
 def test_cli_refuses_partial_flip_without_confirmation(
@@ -550,3 +550,38 @@ def test_alignment_needs_horizontally_separated_reference() -> None:
 
     assert survey_solve.align(solution, reference) is None
     assert survey_solve.align(solution, reference, mirror=False) is None
+
+
+def test_flip_across_collinear_anchors_is_detected() -> None:
+    # 0x0100〜0x0102 が x 軸上に一直線に並び、0x0103 と 0x0104 はその 3 台とだけ測る (互いは欠測)。
+    # 一般の位置なら形は一意に決まるが、この配置では 0x0104 を x 軸について折り返しても測距が変わらない
+    layout = {
+        0x0100: (0.0, 0.0, 0.25),
+        0x0101: (3.0, 0.0, 0.25),
+        0x0102: (-3.0, 0.0, 0.25),
+        0x0103: (0.0, 4.0, 0.25),
+        0x0104: (0.0, -2.25, 0.25),
+    }
+    solution = _solve(layout, _log(layout, skip=_skip_both([(0x0103, 0x0104)])))
+
+    assert solution.critical_edges == []
+    assert ([0x0100, 0x0101, 0x0102], [0x0104]) in solution.flippable
+
+
+def test_degenerate_initial_layout_is_retried() -> None:
+    # 水平位置がほぼ重なり高さだけが違う配置に負のバイアスが乗ると、全組の測距が高さの差より短くなり、
+    # バイアス 0 の MDS では全点が重なる。バイアスの初期値を下げて試し直せば解ける
+    layout = {
+        0x0100: (0.0, 0.0, 0.0),
+        0x0101: (0.2, 0.0, 0.6),
+        0x0102: (0.2, 0.2, 1.2),
+        0x0103: (0.0, 0.2, 1.8),
+        0x0104: (0.1, 0.1, 2.4),
+    }
+    solution = _solve(layout, _log(layout, bias_m=-0.08))
+
+    assert solution.bias_m == pytest.approx(-0.08, abs=0.01)
+    assert solution.rms_m < 2e-3
+    xy = dict(zip(solution.ids, solution.xy, strict=True))
+    for a, b in itertools.combinations(sorted(layout), 2):
+        assert math.dist(xy[a], xy[b]) == pytest.approx(math.dist(layout[a][:2], layout[b][:2]), abs=0.03)
