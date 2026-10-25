@@ -25,6 +25,7 @@ import argparse
 import itertools
 import json
 import math
+import random
 import re
 import statistics
 import sys
@@ -50,6 +51,8 @@ _RANK_TOLERANCE = 1e-9
 _COLLINEAR_RATIO = 0.05
 # ゲージの基準を ID 順に選ぶとき、最も離れた候補に対してこの割合未満しか離れていないアンカーは飛ばす
 _GAUGE_MIN_RATIO = 0.3
+# 手測りの座標系へ重ねるとき、共通のアンカーの手測りの水平位置がこれ以上離れた組が無ければ、回転を決められない
+_MIN_REFERENCE_SPAN_M = 0.1
 
 
 class SurveyError(ValueError):
@@ -108,6 +111,9 @@ class Solution:
     flippable: list[tuple[int, int, list[int]]] = field(default_factory=list)
     # ゲージの基準にしたアンカー (原点、+X 軸上、y > 0)。_choose_gauge() を参照
     gauge_ids: tuple[int, int, int] = (0, 0, 0)
+    # 1 本でも欠けると形が崩れる測距の組 (冗長剛性が無い)。空でなければ、同じ測距を満たす別の形が
+    # ありうる。_critical_edges() を参照
+    critical_edges: list[tuple[int, int]] = field(default_factory=list)
     rms_m: float = field(init=False)
 
     def __post_init__(self) -> None:
@@ -367,6 +373,58 @@ def _flippable_groups(ids: list[int], edges: list[Edge]) -> list[tuple[int, int,
     return groups
 
 
+def _critical_edges(ids: list[int], edges: list[Edge]) -> list[tuple[int, int]]:
+    """1 本でも欠けると形が崩れる測距の組を返す (アンカーが 4 台以上のとき)。
+
+    2 次元で測距から形が一意に決まる (大域剛性) には、測距のつながりが 3 連結で、かつどの 1 本を
+    外しても形が崩れない (冗長剛性) ことが要る (Jackson-Jordán)。3 連結でない場合は _flippable_groups()
+    が見つけるので、ここでは冗長剛性を調べる。例えば三角形 2 つを 3 本でつないだ 6 台は、ランクも
+    落ちず 2 台で分断もされないが、同じ測距を満たす別の形がある。
+
+    測距の組が欠けて形が崩れるかは配置によらない性質 (一般の位置では) なので、乱数で置いた座標で
+    剛性行列 R を作って調べる。組 k を外しても階数が落ちないのは、R の行の一次従属 (自己応力) に
+    組 k が加わる場合だけなので、Rᵀ の簡約行階段形から 1 回で求まる。
+    """
+    n = len(ids)
+    if n < 4:
+        return []
+    rng = random.Random(0)
+    position = {anchor_id: (rng.random(), rng.random()) for anchor_id in ids}
+    column = {anchor_id: 2 * k for k, anchor_id in enumerate(ids)}
+    # Rᵀ: 行が座標 (2n)、列が測距の組
+    m = len(edges)
+    rt = [[0.0] * m for _ in range(2 * n)]
+    for k, e in enumerate(edges):
+        dx = position[e.a][0] - position[e.b][0]
+        dy = position[e.a][1] - position[e.b][1]
+        rt[column[e.a]][k], rt[column[e.a] + 1][k] = dx, dy
+        rt[column[e.b]][k], rt[column[e.b] + 1][k] = -dx, -dy
+    pivots: list[tuple[int, int]] = []  # (行, 列)
+    row = 0
+    for col in range(m):
+        best = max(range(row, 2 * n), key=lambda r: abs(rt[r][col]), default=None)
+        if best is None or abs(rt[best][col]) < 1e-9:
+            continue
+        rt[row], rt[best] = rt[best], rt[row]
+        pivot = rt[row][col]
+        rt[row] = [value / pivot for value in rt[row]]
+        for other in range(2 * n):
+            if other != row and rt[other][col] != 0.0:
+                factor = rt[other][col]
+                rt[other] = [a - factor * b for a, b in zip(rt[other], rt[row], strict=True)]
+        pivots.append((row, col))
+        row += 1
+        if row == 2 * n:
+            break
+    if len(pivots) < 2 * n - 3:
+        # そもそも形が決まらない。solve() のランクの検査で断るので、ここでは挙げない
+        return []
+    free = [col for col in range(m) if col not in {c for _, c in pivots}]
+    # 自由な列は自己応力の基底に必ず入るので、外しても形は崩れない。主元の列は、どれかの自由な列との
+    # 係数が 0 でなければ自己応力に加わる
+    return [(edges[col].a, edges[col].b) for r, col in pivots if all(abs(rt[r][f]) < 1e-9 for f in free)]
+
+
 def solve(
     edges: list[Edge],
     z_by_id: dict[int, float],
@@ -398,6 +456,7 @@ def solve(
             "そのアンカーとの測距を取り直すか、--exclude を見直してください"
         )
     flippable = _flippable_groups(ids, edges) if n > 3 else []
+    critical = _critical_edges(ids, edges)
 
     estimate_bias = fixed_bias_m is None
     # 未知数: 1 番の x、2 番以降の (x, y)、(推定するなら) b
@@ -549,6 +608,7 @@ def solve(
         eigenvalues,
         flippable,
         gauge_ids,
+        critical,
     )
 
 
@@ -574,14 +634,20 @@ def align(
     """推定した座標を、手測りの座標へ回転・平行移動 (必要なら鏡映) で重ねる。
 
     スケールは変えない。スケールのずれはバイアスの推定の誤りを表すので、重ね合わせで隠さない。
-    共通のアンカーが 2 台未満なら None を返す。
+    手測りの水平位置が _MIN_REFERENCE_SPAN_M 以上離れた共通のアンカーの組が無い (共通のアンカーが
+    2 台未満か、真上と真下のように重なる) ときは、回転を決められないので None を返す。鏡映の指定では
+    この曖昧さは解けない。
 
     鏡映の有無は、`mirror` を渡せばその向きにし、渡さなければ手測りとの差の小さい方を選ぶ。
     ただし共通のアンカーが 3 台未満か、手測りの座標で一直線に並ぶときは、どちらの向きでも差が
     同じになり判定できないので、`ambiguous` を立てる。
     """
     common = [i for i, anchor_id in enumerate(solution.ids) if anchor_id in reference_xy]
-    if len(common) < 2:
+    spans = [
+        math.dist(reference_xy[solution.ids[a]], reference_xy[solution.ids[b]])
+        for a, b in itertools.combinations(common, 2)
+    ]
+    if not spans or max(spans) < _MIN_REFERENCE_SPAN_M:
         return None
     candidates: list[Alignment] = []
     for mirrored in (False, True) if mirror is None else (mirror,):
@@ -654,6 +720,12 @@ def format_report(
         lines.append(
             "  冗長度が 0 なので残差は常に 0 になり、測距の誤りを残差から見つけられません。"
             "手測りの座標と突き合わせてください"
+        )
+    if solution.critical_edges:
+        names = ", ".join(f"{_hex(a)}-{_hex(b)}" for a, b in solution.critical_edges)
+        lines.append(
+            f"  次の組の測距は 1 本でも欠けると形が崩れ、同じ測距を満たす別の形がありえます: {names}。"
+            "測距の組を足すか、形が正しいか目で確かめてください"
         )
     for u, v, group in solution.flippable:
         names = ", ".join(_hex(anchor_id) for anchor_id in group)
@@ -805,13 +877,14 @@ def run(args: argparse.Namespace) -> list[str]:
         )
     if reference and alignment is None:
         problems.append(
-            "--reference の座標表と共通のアンカーが 1 台以下なので、手測りの座標系へ重ねられません。"
+            "--reference の座標表と、水平位置の異なる共通のアンカーが 2 台未満なので、手測りの座標系へ"
+            "重ねられません (回転が決まりません)。"
             f"上の座標は手測りとは別の座標系 ({_hex(solution.gauge_ids[0])} が原点) です"
         )
-    if solution.flippable and not args.accept_flip:
+    if (solution.flippable or solution.critical_edges) and not args.accept_nonunique:
         problems.append(
-            "測距の組み合わせで向きが決まらないアンカーがあります (上の表示を参照)。--mirror では"
-            "決まらないので、測距の組を足すか、向きを目で確かめてから --accept-flip を付けてください"
+            "測距の組み合わせでは配置が一意に決まりません (上の表示を参照)。--mirror では決まらないので、"
+            "測距の組を足すか、置かれた形を目で確かめてから --accept-nonunique を付けてください"
         )
     if problems:
         report.append("")
@@ -869,10 +942,10 @@ def build_parser() -> argparse.ArgumentParser:
         "一直線に並ぶときは判定できないので、yes / no で指定する",
     )
     parser.add_argument(
-        "--accept-flip",
+        "--accept-nonunique",
         action="store_true",
-        help="2 台を結ぶ直線について一部のアンカーを折り返しても測距が変わらない配置で、向きを目で確かめた"
-        "ことを示す。付けないとその配置の座標表は書き出さない",
+        help="測距の組み合わせで配置が一意に決まらない (一部を折り返せる、1 本欠けると形が崩れる) ときに、"
+        "置かれた形を目で確かめたことを示す。付けないとその配置の座標表は書き出さない",
     )
     parser.add_argument("--out", help="推定した座標表を書き出すファイル (source: survey)")
     parser.add_argument("--note", help="座標表の note")

@@ -458,8 +458,8 @@ def test_cli_refuses_partial_flip_without_confirmation(
     args = [str(log), "--fixed-bias-mm", "0", "--out", str(out)]
     assert survey_solve.main(args) == 1
     assert not out.exists()
-    assert "--accept-flip" in capsys.readouterr().err
-    assert survey_solve.main([*args, "--accept-flip"]) == 0
+    assert "--accept-nonunique" in capsys.readouterr().err
+    assert survey_solve.main([*args, "--accept-nonunique"]) == 0
     assert out.exists()
 
 
@@ -478,3 +478,75 @@ def test_gauge_is_rechosen_when_bias_collapses_baseline() -> None:
     assert solution.bias_m == pytest.approx(0.08, abs=1e-3)
     assert solution.gauge_ids[1] != 0x0101
     _assert_same_shape(layout, solution)
+
+
+def test_critical_edges_are_detected_for_prism_layout() -> None:
+    # 三角形 {0,1,2} と {3,4,5} の内部と 0-3・1-4・2-5 だけを測る (三角柱)。ランクも落ちず 2 台で分断も
+    # されないが、どの 1 本を外しても形が崩れ、同じ測距を満たす別の形がある
+    layout = {
+        0x0100: (0.0, 0.0, 0.25),
+        0x0101: (1.0, 0.1, 0.25),
+        0x0102: (0.4, 0.9, 0.25),
+        0x0103: (-0.8, -0.6, 0.25),
+        0x0104: (2.1, -0.4, 0.25),
+        0x0105: (0.6, 2.2, 0.25),
+    }
+    kept = {
+        frozenset(p)
+        for p in [
+            (0x0100, 0x0101),
+            (0x0101, 0x0102),
+            (0x0100, 0x0102),
+            (0x0103, 0x0104),
+            (0x0104, 0x0105),
+            (0x0103, 0x0105),
+            (0x0100, 0x0103),
+            (0x0101, 0x0104),
+            (0x0102, 0x0105),
+        ]
+    }
+    skip = _skip_both([(a, b) for a, b in itertools.combinations(layout, 2) if frozenset((a, b)) not in kept])
+    solution = _solve(layout, _log(layout, skip=skip), fixed_bias_m=0.0)
+
+    assert solution.flippable == []
+    assert {frozenset(e) for e in solution.critical_edges} == kept
+
+
+def test_full_survey_has_no_critical_edges() -> None:
+    for layout in (LAYOUT, {k: v for k, v in LAYOUT.items() if k != 0x0104}):
+        solution = _solve(layout, _log(layout))
+        assert solution.critical_edges == []
+        assert solution.flippable == []
+
+
+def test_cli_refuses_critical_edges_without_confirmation(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # 5 台の全 10 組から 3 本を外すと 7 本 (= 2n - 3) になり、形は決まるが、どの 1 本を外しても崩れる
+    skip = _skip_both([(0x0100, 0x0102), (0x0101, 0x0103), (0x0100, 0x0104)])
+    lines = _log(LAYOUT, skip=skip)
+    log = tmp_path / "survey.log"
+    log.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    out = tmp_path / "survey.json"
+
+    solution = _solve(LAYOUT, lines, fixed_bias_m=0.0)
+    assert solution.critical_edges
+    args = [str(log), "--fixed-bias-mm", "0", "--out", str(out)]
+    assert survey_solve.main(args) == 1
+    assert "--accept-nonunique" in capsys.readouterr().err
+    assert survey_solve.main([*args, "--accept-nonunique"]) == 0
+
+
+def test_alignment_needs_horizontally_separated_reference() -> None:
+    # 共通の基準点が真上と真下 (水平位置が同じ) なら回転が決まらないので、--mirror を指定しても重ねない
+    layout = {
+        0x0100: (0.0, 0.0, 0.0),
+        0x0101: (0.0, 0.0, 2.4),
+        0x0102: (0.44, 0.0, 0.0),
+        0x0103: (0.0, 1.17, 0.0),
+    }
+    solution = _solve(layout, _log(layout))
+    reference = {anchor_id: layout[anchor_id][:2] for anchor_id in (0x0100, 0x0101)}
+
+    assert survey_solve.align(solution, reference) is None
+    assert survey_solve.align(solution, reference, mirror=False) is None
